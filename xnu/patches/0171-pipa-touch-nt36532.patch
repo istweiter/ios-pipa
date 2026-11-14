@@ -1,0 +1,24 @@
+--- a/bsd/dev/sweet_touch.c
++++ b/bsd/dev/sweet_touch.c
+@@ -98,8 +98,8 @@
+ #define TOUCH_SPI_CFG        ((1u << 2) | (2u << 6))  /* func qup4, 6 mA, no pull */
+ 
+ #define TOUCH_MAX_FINGERS    10
+-#define TOUCH_ABS_X          1080
+-#define TOUCH_ABS_Y          2400
++#define TOUCH_ABS_X          1800
++#define TOUCH_ABS_Y          2880
+ 
+ /* NT36xxx SPI protocol (Novatek nt36xxx_spi driver) */
+ #define NVT_SPI_HDR          2              /* address byte + dummy byte */
+@@ -784,8 +784,8 @@
+ 		if (id == 0 || id > TOUCH_MAX_FINGERS || (status != 1 && status != 2))
+ 			continue;
+ 		id -= 1;
+-		int x = (p[1] << 4) | (p[3] >> 4);
+-		int y = (p[2] << 4) | (p[3] & 0x0f);
++		int x = (int)((((unsigned)p[1] << 8) | (unsigned)p[2]) / 10u);
++		int y = (int)((((unsigned)p[3] << 8) | (unsigned)p[4]) / 10u);
+ 		if (x >= TOUCH_ABS_X) x = TOUCH_ABS_X - 1;
+ 		if (y >= TOUCH_ABS_Y) y = TOUCH_ABS_Y - 1;
+ 		now |= 1u << id;
