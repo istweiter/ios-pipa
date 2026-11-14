@@ -1,0 +1,13 @@
+--- a/bsd/dev/sweet_touch.c
++++ b/bsd/dev/sweet_touch.c
+@@ -772,8 +772,8 @@
+ 		const uint8_t *p = r + 6u * i;
+ 		unsigned id = p[0] >> 3, ev = p[0] & 7u;
+ 		if (id == 0 || id > TOUCH_MAX_FINGERS || (ev != 1 && ev != 2)) continue;
+-		int x = (int)(((unsigned)p[1] << 4) | (p[3] >> 4)) + xoff;
+-		int y = (int)(((unsigned)p[2] << 4) | (p[3] & 0x0fu)) + yoff;
++		int x = (int)((unsigned)p[1] | ((unsigned)p[2] << 8)) + xoff;
++		int y = (int)((unsigned)p[3] | ((unsigned)p[4] << 8)) + yoff;
+ 		int xmax = 1600, ymax = 2560;
+ 		(void)PE_parse_boot_argn("sweettouch_xmax", &xmax, sizeof(xmax));
+ 		(void)PE_parse_boot_argn("sweettouch_ymax", &ymax, sizeof(ymax));
