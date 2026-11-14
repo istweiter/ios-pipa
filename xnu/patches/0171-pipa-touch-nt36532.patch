@@ -1,0 +1,67 @@
+--- a/bsd/dev/sweet_touch.c
++++ b/bsd/dev/sweet_touch.c
+@@ -98,8 +98,8 @@
+ #define TOUCH_SPI_CFG        ((1u << 2) | (2u << 6))  /* func qup4, 6 mA, no pull */
+ 
+ #define TOUCH_MAX_FINGERS    10
+-#define TOUCH_ABS_X          1080
+-#define TOUCH_ABS_Y          2400
++#define TOUCH_ABS_X          1800
++#define TOUCH_ABS_Y          2880
+ 
+ /* NT36xxx SPI protocol (Novatek nt36xxx_spi driver) */
+ #define NVT_SPI_HDR          2              /* address byte + dummy byte */
+@@ -763,41 +763,21 @@
+ static void
+ touch_parse_report(const uint8_t *r, size_t len)
+ {
+-	bool any = false;
+-	for (size_t i = 0; i < len && !any; ++i)
+-		any = r[i] != 0 && r[i] != 0xff;
+-	if (!any && !st.active)
+-		return;
+-
+-	if (any && (st.debug || !st.dumped)) {
+-		st.dumped = true;
+-		printf("SWEET TOUCH: raw");
+-		for (size_t i = 0; i < (len < 24 ? len : 24); ++i)
+-			printf(" %02x", r[i]);
+-		printf("\n");
+-	}
+-
++	if (len < 61) return;
+ 	uint32_t now = 0;
+-	for (unsigned i = 0; i < TOUCH_MAX_FINGERS && 6u * i + 3u < len; ++i) {
++	for (unsigned i = 0; i < TOUCH_MAX_FINGERS; ++i) {
+ 		const uint8_t *p = r + 6u * i;
+-		unsigned id = p[0] >> 3, status = p[0] & 7u;
+-		if (id == 0 || id > TOUCH_MAX_FINGERS || (status != 1 && status != 2))
+-			continue;
+-		id -= 1;
+-		int x = (p[1] << 4) | (p[3] >> 4);
+-		int y = (p[2] << 4) | (p[3] & 0x0f);
+-		if (x >= TOUCH_ABS_X) x = TOUCH_ABS_X - 1;
+-		if (y >= TOUCH_ABS_Y) y = TOUCH_ABS_Y - 1;
+-		now |= 1u << id;
+-		if (!(st.active & (1u << id)) || st.x[id] != x || st.y[id] != y) {
+-			st.x[id] = x;
+-			st.y[id] = y;
+-			sweet_hid_touch((int)id, 1, x, y);
+-		}
++		unsigned id = p[0] >> 3, ev = p[0] & 7u;
++		if (id == 0 || id > TOUCH_MAX_FINGERS || (ev != 1 && ev != 2)) continue;
++		int x = (int)(((unsigned)p[1] << 4) | (p[3] >> 4));
++		int y = (int)(((unsigned)p[2] << 4) | (p[3] & 0x0fu));
++		if (x < 0 || y < 0 || x >= TOUCH_ABS_X || y >= TOUCH_ABS_Y) continue;
++		unsigned idx = id - 1; now |= (1u << idx);
++		if (!(st.active & (1u << idx)) || st.x[idx] != x || st.y[idx] != y) { st.x[idx] = x; st.y[idx] = y; sweet_hid_touch((int)idx, 1, x, y); }
+ 	}
+-	for (unsigned id = 0; id < TOUCH_MAX_FINGERS; ++id) {
+-		if ((st.active & (1u << id)) && !(now & (1u << id)))
+-			sweet_hid_touch((int)id, 0, st.x[id], st.y[id]);
++	for (unsigned idx = 0; idx < TOUCH_MAX_FINGERS; ++idx) {
++		uint32_t bit = 1u << idx;
++		if ((st.active & bit) && !(now & bit)) sweet_hid_touch((int)idx, 0, st.x[idx], st.y[idx]);
+ 	}
+ 	st.active = now;
+ }
