@@ -11,7 +11,7 @@
 +#define NVT_SPI_RD_FAST_ADDR 0x1fb535u     /* Pipa NT36532 */
 +#define NVT_TRIM_ADDR        0x1fb104u     /* Pipa NT36532 trim */
  #define NVT_TRIM_LEN         6              /* NT36675: 0c/0e xx xx 72 66 03 */
- #define NVT_EVENT_BUF_ADDR   0x22d00u       /* NT36675 EVENT_BUF_ADDR */
+ #define NVT_EVENT_BUF_ADDR   0x125800u      /* NT36532 Pipa memory map */
  #define NVT_POINT_DATA_LEN   65
 @@ -121,17 +121,18 @@
  #define NVT_EVENT_MAP_RESET_COMPLETE 0x60u

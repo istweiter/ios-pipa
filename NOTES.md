@@ -1211,3 +1211,8 @@ The 2026-10-14 … 2026-10-18 session logs (first XNU boots, iOS root image vers
      cpu_init, before arm_vm_init.
   5. panic hook at top of panic_trap_to_debugger: va_copy + _doprnt(fmt, &copy, sweet_early_putc, 16).
   Verify with tools/xnu-cc.py (compile+symbols) and patch-order simulation before the single CI run.
+
+## NT36532 event-buffer map correction (2026-11-18)
+- Compared the Pipa driver submodule `xVanTuring/PipaNovatekTouch` at gitlink `0025115b7125b53e582f7c6934bb27610d001647`: its NT36532 and NT36532-cascade maps specify `event_buf=0x125800` (NT36532E cascade uses `0x11c400`). Shim hardware probe also polls reset state at `0x125860`, FWINFO at `0x125878`, and raw reports from `0x125800`.
+- Patch 0172 had retained `NVT_EVENT_BUF_ADDR=0x22d00`, explicitly the Apollo NT36675 value. Updated patch 0172 to set `0x125800` for the observed Pipa NT36532 map. Device trim identifies NT36532 but does not yet distinguish the E-cascade map; keep that as a follow-up if reset state still fails.
+- No XNU build or hardware test has run with this address correction; do not boot an image until the patched source is compiled by CI and a new artifact is built. No firmware-selection inference or installed-system change was made.
