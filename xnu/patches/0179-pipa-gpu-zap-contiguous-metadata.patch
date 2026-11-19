@@ -1,32 +1,52 @@
 --- a/bsd/dev/sweet_gpu.c
 +++ b/bsd/dev/sweet_gpu.c
-@@ -808,1 +808,1 @@
+@@ -805,7 +805,7 @@
+  * each, the hash segment's size the file size of program header 1.
+  */
+ static bool
 -gpu_zap_header(const uint8_t *mdt, unsigned int size, uint64_t *phys)
 +gpu_zap_header(const uint8_t *mdt, unsigned int size, vm_offset_t *header_va, uint64_t *phys)
-@@ -826,2 +826,3 @@
+ {
+ 	vm_offset_t page = 0;
+ 	if (size < 52u + 2u * 32u || mdt[0] != 0x7f || mdt[1] != 'E' || mdt[2] != 'L' || mdt[3] != 'F' || mdt[4] != 1) {
+@@ -821,15 +821,19 @@
+ 		printf("SWEET GPU: step 20: not the header followed by the hashes alone: not what TrustZone takes\n");
+ 		return false;
+ 	}
 -	if (kmem_alloc(kernel_map, &page, round_page(size), KMA_KOBJECT | KMA_ZERO | KMA_DATA, VM_KERN_MEMORY_IOKIT) !=
 -	    KERN_SUCCESS) {
 +	/* PAS_INIT_IMAGE gets one physical address for the whole header; ordinary kmem_alloc need not be contiguous. */
 +	if (kmem_alloc_contig(kernel_map, &page, round_page(size), PAGE_MASK, 0, 0,
 +	    KMA_KOBJECT | KMA_ZERO | KMA_DATA, VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) {
-@@ -834,3 +835,6 @@
+ 		printf("SWEET GPU: step 20: no memory for the zap header\n");
+ 		return false;
+ 	}
+ 	for (unsigned int i = 0; i < size; ++i)
  		((uint8_t *)page)[i] = mdt[i];
  	gpu_to_memory(page, round_page(size));
 +	*header_va = page;
  	*phys = kvtophys(page);
 +	printf("SWEET GPU: step 20: contiguous zap metadata at VA %#llx PA %#llx (%u bytes)\n", (unsigned long long)page,
 +	    (unsigned long long)*phys, size);
-@@ -2361,1 +2365,2 @@
--	uint64_t zap_header_pa = 0, zap_answer = ~0ull;
+ 	return true;
+ }
+ 
+@@ -2358,18 +2362,22 @@
+ 	}
+ 
+ 	/* stage 2: the signature. A yielding call that passes the .mdt, but touches no GPU (HackiOS step 12). */
 +	vm_offset_t zap_header_va = 0;
-+	uint64_t zap_header_pa = 0, zap_answer = ~0ull;
-@@ -2363,1 +2367,1 @@
+ 	uint64_t zap_header_pa = 0, zap_answer = ~0ull;
+ 	int32_t sig;
 -	if (!gpu_zap_header(zap_mdt, zap_mdt_size, &zap_header_pa))
 +	if (!gpu_zap_header(zap_mdt, zap_mdt_size, &zap_header_va, &zap_header_pa))
-@@ -2367,1 +2371,2 @@
+ 		goto collapse;
+ 	printf("SWEET GPU: step 20: hand TrustZone the zap shader's signature to check (image %u)\n", PAS_GPU);
+ 	sig = gpu_scm("to take the zap shader's signature", SCM_64 | SCM_SIP | SCM_PAS_INIT_IMAGE, SCM_VALUE_AND_BUFFER,
  	    PAS_GPU, zap_header_pa, 0, &zap_answer);
 +	kmem_free(kernel_map, zap_header_va, round_page(zap_mdt_size));
-@@ -2370,3 +2375,5 @@
+ 	if (sig == 0 && zap_answer == 0)
+ 		printf("SWEET GPU: step 20: TRUSTZONE ACCEPTS THE ZAP SHADER'S SIGNATURE FROM THIS KERNEL\n");
 -	else
 -		printf("SWEET GPU: step 20: TrustZone does not take the signature (returns %d, answer %#llx): a kernel before "
 -		    "this one may already hold one\n", sig, (unsigned long long)zap_answer);
@@ -35,3 +55,6 @@
 +		    "secure mode\n", sig, (unsigned long long)zap_answer);
 +		goto collapse;
 +	}
+ 	if (zap_stage < 3) {
+ 		printf("SWEET GPU: step 20: stopping after the signature (sweetgpuzap=2); =3 loads it and leaves secure mode\n");
+ 		goto collapse;
