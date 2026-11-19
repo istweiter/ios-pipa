@@ -1,0 +1,37 @@
+--- a/bsd/dev/sweet_gpu.c
++++ b/bsd/dev/sweet_gpu.c
+@@ -808,1 +808,1 @@
+-gpu_zap_header(const uint8_t *mdt, unsigned int size, uint64_t *phys)
++gpu_zap_header(const uint8_t *mdt, unsigned int size, vm_offset_t *header_va, uint64_t *phys)
+@@ -826,2 +826,3 @@
+-	if (kmem_alloc(kernel_map, &page, round_page(size), KMA_KOBJECT | KMA_ZERO | KMA_DATA, VM_KERN_MEMORY_IOKIT) !=
+-	    KERN_SUCCESS) {
++	/* PAS_INIT_IMAGE gets one physical address for the whole header; ordinary kmem_alloc need not be contiguous. */
++	if (kmem_alloc_contig(kernel_map, &page, round_page(size), PAGE_MASK, 0, 0,
++	    KMA_KOBJECT | KMA_ZERO | KMA_DATA, VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) {
+@@ -834,3 +834,6 @@
+ 		((uint8_t *)page)[i] = mdt[i];
+ 	gpu_to_memory(page, round_page(size));
++	*header_va = page;
+ 	*phys = kvtophys(page);
++	printf("SWEET GPU: step 20: contiguous zap metadata at VA %#llx PA %#llx (%u bytes)\n", (unsigned long long)page,
++	    (unsigned long long)*phys, size);
+@@ -2361,1 +2361,2 @@
+-	uint64_t zap_header_pa = 0, zap_answer = ~0ull;
++	vm_offset_t zap_header_va = 0;
++	uint64_t zap_header_pa = 0, zap_answer = ~0ull;
+@@ -2363,1 +2364,1 @@
+-	if (!gpu_zap_header(zap_mdt, zap_mdt_size, &zap_header_pa))
++	if (!gpu_zap_header(zap_mdt, zap_mdt_size, &zap_header_va, &zap_header_pa))
+@@ -2367,1 +2368,2 @@
+ 	    PAS_GPU, zap_header_pa, 0, &zap_answer);
++	kmem_free(kernel_map, zap_header_va, round_page(zap_mdt_size));
+@@ -2370,3 +2372,5 @@
+-	else
+-		printf("SWEET GPU: step 20: TrustZone does not take the signature (returns %d, answer %#llx): a kernel before "
+-		    "this one may already hold one\n", sig, (unsigned long long)zap_answer);
++	else {
++		printf("SWEET GPU: step 20: TrustZone rejected this zap signature (returns %d, answer %#llx); refusing to leave "
++		    "secure mode\n", sig, (unsigned long long)zap_answer);
++		goto collapse;
++	}
