@@ -1,0 +1,24 @@
+--- a/bsd/dev/sweet_gpu.c
++++ b/bsd/dev/sweet_gpu.c
+@@ -889,7 +889,20 @@
+ 	bool refused = gpu_smmu_faulted(smmu, pg, npg, CORE_CONTEXT, "CORE");
+ 	printf("SWEET GPU:   rptr %u of %u, status %#x int %#x cp fault %#x cp int %#x protect %#x\n", rptr, to, status,
+ 	    gpu_rd(gpu, GPU_RBBM_INT_0_STATUS), fault, gpu_rd(gpu, GPU_CP_INTERRUPT_STATUS), gpu_rd(gpu, GPU_CP_PROTECT_STATUS));
+-	return rptr == to && !(status & GPU_BUSY) && !fault && !refused;
++	bool ok = rptr == to && !(status & GPU_BUSY) && !fault && !refused;
++	if (!ok) {
++		uint32_t status3 = gpu_rd(gpu, GPU_WORD(0x0213));
++		uint32_t cp_status1 = gpu_rd(gpu, GPU_WORD(0x0825));
++		uint32_t cb = (npg + CORE_CONTEXT) * pg;
++		uint32_t fsr = gpu_rd(smmu, cb + SMMU_CB_FSR);
++		uint32_t far_hi = gpu_rd(smmu, cb + SMMU_CB_FAR + 4u);
++		uint32_t far_lo = gpu_rd(smmu, cb + SMMU_CB_FAR);
++		uint32_t fsynr0 = gpu_rd(smmu, cb + SMMU_CB_FSYNR0);
++		printf("SWEET GPU: diagnostic: rbbm_status3 %#x smmu_stalled_on_fault %u cp_status1 %#x "
++		    "smmu_fsr %#x far %#x:%#x fsynr0 %#x\n", status3, (status3 >> 24) & 1u, cp_status1, fsr,
++		    far_hi, far_lo, fsynr0);
++	}
++	return ok;
+ }
+ 
+ /* One band of solid colour by the 2D engine (Mesa fd6_clear_surface; HackiOS ring_fill). */
