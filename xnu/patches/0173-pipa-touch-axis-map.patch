@@ -1,0 +1,21 @@
+--- a/bsd/dev/sweet_touch.c
++++ b/bsd/dev/sweet_touch.c
+@@ -789,8 +789,14 @@
+ 		if (id == 0 || id > TOUCH_MAX_FINGERS || (status != 1 && status != 2))
+ 			continue;
+ 		id -= 1;
+-		int x = (int)((((unsigned)p[1] << 8) | (unsigned)p[2]) / 10u);
+-		int y = (int)((((unsigned)p[3] << 8) | (unsigned)p[4]) / 10u);
+-		if (x >= TOUCH_ABS_X) x = TOUCH_ABS_X - 1;
+-		if (y >= TOUCH_ABS_Y) y = TOUCH_ABS_Y - 1;
++		/* NT36532 reports portrait-oriented panel coordinates in tenths of a pixel.
++		 * The Pipa display/HID surface is landscape: rotate the axes and scale the
++		 * complete 1800x2880 sensor range into SweetHID's 1080x2400 logical range.
++		 */
++		unsigned raw_x = (((unsigned)p[1] << 8) | (unsigned)p[2]) / 10u;
++		unsigned raw_y = (((unsigned)p[3] << 8) | (unsigned)p[4]) / 10u;
++		if (raw_x >= TOUCH_ABS_X) raw_x = TOUCH_ABS_X - 1;
++		if (raw_y >= TOUCH_ABS_Y) raw_y = TOUCH_ABS_Y - 1;
++		int x = (int)(raw_y * 1079u / (TOUCH_ABS_Y - 1u));
++		int y = (int)(raw_x * 2399u / (TOUCH_ABS_X - 1u));
+ 		now |= 1u << id;
