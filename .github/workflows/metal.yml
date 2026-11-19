@@ -46,7 +46,7 @@ jobs:
         run: make asan -j4
 
   ios:
-    runs-on: macos-15
+    runs-on: macos-15-intel
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
