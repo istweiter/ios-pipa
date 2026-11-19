@@ -139,7 +139,7 @@
  /* ---- HFI: messages through the queues of step 13 ---- */
  static volatile uint32_t *gmu_hfi_q;          /* uncached view of the HFI page */
  static uint32_t hfi_qoff, hfi_seq;
-@@ -1791,6 +1907,91 @@
+@@ -1791,6 +1907,93 @@
  		goto collapse;
  	}
  	printf("SWEET GPU: step 20: THE 3D CORE IS OUT OF SECURE MODE\n");
@@ -160,7 +160,9 @@
 +	ring[at++] = 0;
 +	ring[at++] = TEST_WORD;
 +	if (!ring_run(gpu, smmu, pg, npg, core_ring.mem, from, at, "CP_MEM_WRITE")) {
-+		printf("SWEET GPU: step 21: the command processor does not get through CP_MEM_WRITE\n");
++		gpu_to_memory(core_scratch.mem, 64);
++		uint32_t partial = *(volatile uint32_t *)core_scratch.mem;
++		printf("SWEET GPU: step 21: failed-run target snapshot %#x (diagnostic only; GPU may still be busy)\n", partial);
 +		goto collapse;
 +	}
 +	gpu_to_memory(core_scratch.mem, 64);
