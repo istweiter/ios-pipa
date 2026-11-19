@@ -8,6 +8,7 @@ name: metal2
 #   lib/libvulkan_freedreno.dylib  Turnip with the darwin kernel backend (turnip/NativeAdrenoABI.h)
 #   bin/vktest                   Turnip smoke test: device, buffer fill/copy, a compute shader, a triangle (sweetmtl=1)
 #   bin/m2vtest                  the metal2vulkan bridge's self-test
+#   bin/pipa-mtl2probe           one-shot Metal.framework device-discovery probe
 #   SHA256SUMS
 on:
   workflow_dispatch:
@@ -91,9 +92,14 @@ jobs:
           mkdir -p out/bin out/lib
           cp -R userland/metal2/metal2/out/SweetMetal2.bundle out/
           cp userland/metal2/metal2/out/m2vtest out/bin/
+          userland/metal2/ios-cc -x objective-c -fobjc-arc -O2 -Wall \
+            -o out/bin/pipa-mtl2probe userland/metal2/metal2/mtl2probe.m \
+            -framework Foundation -framework Metal
+          strip -x out/bin/pipa-mtl2probe
+          codesign -f -s - out/bin/pipa-mtl2probe
           cp userland/metal2/turnip/out/vktest out/bin/
           cp userland/metal2/turnip/out/libvulkan_freedreno.dylib out/lib/
-          otool -L out/SweetMetal2.bundle/HotMetal2 out/bin/vktest
+          otool -L out/SweetMetal2.bundle/HotMetal2 out/bin/vktest out/bin/pipa-mtl2probe
           ls -laR out
 
       - name: Checksums

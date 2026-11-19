@@ -38,3 +38,15 @@ re-done here on this kernel's own GPU core (xnu 0170, `bsd/dev/sweet_gpu.c`).
 Run-time switches the plug-in reads (files on the phone): `/var/local/mtl2.log` (its log, if the file exists),
 `/var/local/mtl2-clients`, `/var/local/mtl2-env` (KEY=VALUE lines), `/var/local/mtl2-tu-debug` (TU_DEBUG),
 `/var/local/mtl2-telemetry`.
+
+### Isolating Metal.framework device discovery
+
+The `sweet-metal2` artifact also contains `bin/pipa-mtl2probe`. It calls only
+`MTLCreateSystemDefaultDevice()`, prints the returned device name (or `nil`),
+and dumps the plug-in and pipeline logs. It does not submit GPU work or change
+the display renderer. For a one-shot UFS-root diagnostic, add
+`--files-from tools/root-files/metal2-probe.txt` to the normal ADT command.
+That list installs the probe, allows only its process name in
+`/var/local/mtl2-clients`, and stages the run-file consumed by the already
+installed `libsweet-fix-mtl2diag.dylib` in `configd`. Keep `configd` and
+`pipa-mtl2probe` in `sweetnull` to capture both the runner and probe output.

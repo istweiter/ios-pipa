@@ -1,0 +1,3 @@
+/usr/local/bin/pipa-mtl2probe=sweet-metal2/bin/pipa-mtl2probe 0:0:0755
+/private/var/local/mtl2-clients=tools/root-files/metal2-probe-clients.txt 0:0:0644
+/private/var/sweet-metal/run=tools/root-files/metal2-probe-run.txt 0:0:0644
