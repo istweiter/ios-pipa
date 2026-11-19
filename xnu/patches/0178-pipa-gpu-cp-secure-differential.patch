@@ -1,0 +1,54 @@
+--- a/bsd/dev/sweet_gpu.c
++++ b/bsd/dev/sweet_gpu.c
+@@ -2233,5 +2233,34 @@
+ 		goto collapse;
+ 	}
+ 	printf("SWEET GPU: step 19: THE 3D CORE TAKES COMMANDS\n");
++	static struct gpu_block core_scratch, core_target;
++	if (steps >= 21) {
++		/* Run the same mapped-memory write before TrustZone/ZAP changes secure mode. */
++		printf("SWEET GPU: step 19: pre-secure CP_MEM_WRITE to %#x\n", TEST_WORD);
++		if (!gpu_block_new(&core_space, &core_scratch, CORE_SCRATCH_VA, 4096, PTE_CORE)) {
++			printf("SWEET GPU: step 19: no memory for pre-secure write\n");
++			goto collapse;
++		}
++		gpu_smmu_refresh(smmu, pg, npg, CORE_CONTEXT, &core_space);
++		*(volatile uint32_t *)core_scratch.mem = 0;
++		gpu_to_memory(core_scratch.mem, 64);
++		uint32_t pre_from = at;
++		ring_pkt7(ring, &at, CP_MEM_WRITE, 3);
++		ring[at++] = CORE_SCRATCH_VA;
++		ring[at++] = 0;
++		ring[at++] = TEST_WORD;
++		if (!ring_run(gpu, smmu, pg, npg, core_ring.mem, pre_from, at, "pre-secure CP_MEM_WRITE")) {
++			gpu_to_memory(core_scratch.mem, 64);
++			uint32_t partial = *(volatile uint32_t *)core_scratch.mem;
++			printf("SWEET GPU: step 19: pre-secure write failed; target snapshot %#x\n", partial);
++			goto collapse;
++		}
++		gpu_to_memory(core_scratch.mem, 64);
++		uint32_t pre_word = *(volatile uint32_t *)core_scratch.mem;
++		printf("SWEET GPU: step 19: pre-secure target %#x: %s\n", pre_word,
++		    pre_word == TEST_WORD ? "PASS" : "FAIL");
++		if (pre_word != TEST_WORD)
++			goto collapse;
++	}
+ 	if (steps < 20)
+ 		goto collapse;
+@@ -2410,13 +2439,9 @@
+ 		goto collapse;
+ 
+ 	/* ---- step 21: a word written to our memory on command ---- */
+-	static struct gpu_block core_scratch, core_target;
+-	printf("SWEET GPU: step 21: map a page for the core; have it write %#x there (CP_MEM_WRITE)\n", TEST_WORD);
+-	if (!gpu_block_new(&core_space, &core_scratch, CORE_SCRATCH_VA, 4096, PTE_CORE)) {
+-		printf("SWEET GPU: step 21: no memory\n");
+-		goto collapse;
+-	}
+-	gpu_smmu_refresh(smmu, pg, npg, CORE_CONTEXT, &core_space);
++	printf("SWEET GPU: step 21: post-secure CP_MEM_WRITE to %#x\n", TEST_WORD);
++	*(volatile uint32_t *)core_scratch.mem = 0;
++	gpu_to_memory(core_scratch.mem, 64);
+ 	uint32_t from = at;
+ 	ring_pkt7(ring, &at, CP_MEM_WRITE, 3);
+ 	ring[at++] = CORE_SCRATCH_VA;
