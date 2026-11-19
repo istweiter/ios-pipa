@@ -1,0 +1,8 @@
+--- a/bsd/dev/sweet_touch.c
++++ b/bsd/dev/sweet_touch.c
+@@ -801,4 +801,4 @@
+ 		if (raw_y >= TOUCH_ABS_Y) raw_y = TOUCH_ABS_Y - 1;
+-		int x = (int)(raw_y * 1079u / (TOUCH_ABS_Y - 1u));
++		int x = 1079 - (int)(raw_y * 1079u / (TOUCH_ABS_Y - 1u));
+ 		int y = (int)((TOUCH_ABS_X - 1u - raw_x) * 2399u / (TOUCH_ABS_X - 1u));
+ 		now |= 1u << id;
