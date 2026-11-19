@@ -37,3 +37,10 @@ temp_*/
 /--help
 tools/init
 tools/sweet-init.o
+
+# local build output and Windows metadata; keep these out of the source repo
+builds/
+tools/out/
+*.DS_Store
+*:Zone.Identifier
+tools/root-files/pipa-files-sweet-init-test.txt
