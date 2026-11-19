@@ -11,6 +11,12 @@ name: metal
 # Apart from userland.yml so that a change here does not rebuild Mesa.
 on:
   workflow_dispatch:
+    inputs:
+      run_host_tests:
+        description: Run the Linux fake-GPU host test jobs
+        required: false
+        type: boolean
+        default: true
   push:
     branches: [main]
     paths:
@@ -20,6 +26,7 @@ on:
 
 jobs:
   host:
+    if: github.event_name != 'workflow_dispatch' || inputs.run_host_tests
     runs-on: ubuntu-24.04
     timeout-minutes: 40
     steps:

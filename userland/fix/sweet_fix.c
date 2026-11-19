@@ -450,16 +450,104 @@ fix_spawn_once(char *const argv[], char *const env[], const char *what)
  * holds lines "env KEY=VALUE", "delay SECONDS" and one command line "PROGRAM ARG ..." (blanks between words, '#'
  * comments); the file is removed first and the program started once, the same way (its name in sweetnull for its
  * output), after the delay (a thread of configd's sleeps: configd starts long before the GPU is kept on).
+ * The reserved command __sweet_mtl2_dump__ reads the live Metal logs in-process and writes them to /dev/null; include
+ * configd in sweetnull for that temporary diagnostic, so it does not depend on iOS shipping cat, sh, or tail.
  */
 static char *run_argv[17], *run_env[17] = { "PATH=/usr/bin:/bin:/usr/sbin:/sbin", NULL };
 static unsigned run_delay;
+
+#define SWEET_MTL2_DUMP "__sweet_mtl2_dump__"
+#define SWEET_MTL2_LOG_MAX (64 * 1024)
+
+static void
+fix_write_null(int fd, const void *data, size_t size)
+{
+	const char *p = data;
+
+	while (size != 0) {
+		size_t count = size > 192 ? 192 : size;
+		ssize_t n = write(fd, p, count);
+
+		if (n <= 0) {
+			return;
+		}
+		p += n;
+		size -= (size_t)n;
+	}
+}
+
+static void
+fix_dump_mtl2_file(int sink, const char *path)
+{
+	char buf[192], line[256];
+	int fd = open(path, O_RDONLY);
+	int n;
+
+	n = snprintf(line, sizeof(line), "PIPA_MTL2_FILE %s\n", path);
+	if (n > 0) {
+		fix_write_null(sink, line, (size_t)n);
+	}
+	if (fd < 0) {
+		n = snprintf(line, sizeof(line), "PIPA_MTL2_OPEN_FAILED %s\n", path);
+		if (n > 0) {
+			fix_write_null(sink, line, (size_t)n);
+		}
+		return;
+	}
+
+	off_t end = lseek(fd, 0, SEEK_END);
+	off_t start = end > SWEET_MTL2_LOG_MAX ? end - SWEET_MTL2_LOG_MAX : 0;
+	if (end >= 0) {
+		(void)lseek(fd, start, SEEK_SET);
+		if (start != 0) {
+			n = snprintf(line, sizeof(line), "PIPA_MTL2_TRUNCATED offset=%lld\n", (long long)start);
+			if (n > 0) {
+				fix_write_null(sink, line, (size_t)n);
+			}
+		}
+	} else {
+		(void)lseek(fd, 0, SEEK_SET);
+	}
+
+	ssize_t got;
+	while ((got = read(fd, buf, sizeof(buf))) > 0) {
+		fix_write_null(sink, buf, (size_t)got);
+	}
+	close(fd);
+	fix_write_null(sink, "\n", 1);
+}
+
+static void
+fix_dump_mtl2(void)
+{
+	static const char marker[] = "PIPA_MTL2_CAPTURE_RAN\n";
+	static const char *const paths[] = {
+	    "/private/var/local/mtl2-env",
+	    "/private/var/local/mtl2.log",
+	    "/private/var/local/m2v-cache/backboardd/pipelines.log",
+	};
+	int sink = open("/dev/null", O_WRONLY);
+
+	if (sink < 0) {
+		return;
+	}
+	fix_write_null(sink, marker, sizeof(marker) - 1);
+	for (unsigned i = 0; i < sizeof(paths) / sizeof(paths[0]); i++) {
+		fix_dump_mtl2_file(sink, paths[i]);
+	}
+	close(sink);
+}
 
 static void *
 fix_run_later(void *unused)
 {
 	(void)unused;
 	sleep(run_delay);
-	fix_spawn_once(run_argv, run_env, "run file:");
+	if (strcmp(run_argv[0], SWEET_MTL2_DUMP) == 0) {
+		fix_dump_mtl2();
+	} else {
+		fix_spawn_once(run_argv, run_env, "run file:");
+	}
 	return NULL;
 }
 
@@ -514,11 +602,16 @@ fix_start_metal_probe(void)
 				rargv[na++] = t;
 			}
 		}
-		if (na != 0 && stat(rargv[0], &st) == 0) {
+		int builtin_dump = na != 0 && strcmp(rargv[0], SWEET_MTL2_DUMP) == 0;
+		if (na != 0 && (builtin_dump || stat(rargv[0], &st) == 0)) {
 			pthread_t t;
 
 			if (run_delay == 0 || pthread_create(&t, NULL, fix_run_later, NULL) != 0) {
-				fix_spawn_once(rargv, renv, "run file:");
+				if (builtin_dump) {
+					fix_dump_mtl2();
+				} else {
+					fix_spawn_once(rargv, renv, "run file:");
+				}
 			} else {
 				pthread_detach(t);
 			}
