@@ -11,7 +11,19 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 ROOT=$(cd "$HERE/../.." && pwd)
 T=${METAL2_WORK:-$ROOT/work/metal2}/turnip
 target=${1:-ios}
-export PATH=$T/venv/bin:/opt/homebrew/opt/bison/bin:/opt/homebrew/opt/flex/bin:$PATH
+if command -v brew >/dev/null 2>&1; then
+	# Homebrew lives under /opt/homebrew on Apple Silicon and /usr/local on Intel.
+	# bison and flex are keg-only, so their bin directories must be prepended explicitly.
+	BISON_PREFIX=$(brew --prefix bison)
+	FLEX_PREFIX=$(brew --prefix flex)
+	export PATH=$BISON_PREFIX/bin:$FLEX_PREFIX/bin:$T/venv/bin:$PATH
+else
+	export PATH=$T/venv/bin:$PATH
+fi
+command -v bison >/dev/null 2>&1 || { echo "bison not found (install Homebrew bison)" >&2; exit 1; }
+command -v flex >/dev/null 2>&1 || { echo "flex not found (install Homebrew flex)" >&2; exit 1; }
+bison --version | head -1
+flex --version
 opts="-Dgallium-drivers= -Dvulkan-drivers=freedreno -Dfreedreno-kmds=darwin -Dtu-darwin-abi-dir=$HERE/turnip
  -Dplatforms=macos -Dglx=disabled -Degl=disabled -Dgbm=disabled -Dopengl=false -Dgles1=disabled -Dgles2=disabled
  -Dllvm=disabled -Dshared-glapi=disabled -Dxmlconfig=disabled -Dshader-cache=disabled -Dtools= -Dbuild-tests=false
@@ -60,7 +72,7 @@ else
 		{ tail -30 "$T/configure-$target.log"; exit 1; }
 fi
 ninja -C "$out" src/freedreno/vulkan/libvulkan_freedreno.dylib > "$T/build-$target.log" 2>&1 ||
-	{ grep -E "error:|FAILED" "$T/build-$target.log" | head -30; exit 1; }
+	{ echo "Turnip build failed; last 120 lines of $T/build-$target.log:" >&2; tail -120 "$T/build-$target.log"; exit 1; }
 lib=$out/src/freedreno/vulkan/libvulkan_freedreno.dylib
 nm -gU "$lib" | grep -q " T _vkGetInstanceProcAddr" || { echo "no vkGetInstanceProcAddr export" >&2; exit 1; }
 if [ "$target" = ios ]; then
