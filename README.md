@@ -1,6 +1,6 @@
 # ios-pipa
 
-**iOS 26 & iPadOS on the Xiaomi Pad 6 (`pipa`, Snapdragon 870 / SM8250-AC)**
+**iOS on the Xiaomi Pad 6 (`pipa`, Snapdragon 870 / SM8250-AC)**
 
 Apple's open-source XNU kernel running on bare metal on the Xiaomi Pad 6, booting the **unmodified iOS / iPadOS userland** (launchd, system daemons, backboardd, and SpringBoard) with tablet UI layout, Adreno 650 GPU hardware acceleration, multi-touch with stylus digitizer support, quad-speaker audio, Wi-Fi, and Bluetooth.
 
@@ -17,7 +17,7 @@ Apple's open-source XNU kernel running on bare metal on the Xiaomi Pad 6, bootin
 | **CPU** | 8-core Kryo 585 (1x Cortex-A77 @ 3.20 GHz Prime, 3x Cortex-A77 @ 2.42 GHz Gold, 4x Cortex-A55 @ 1.80 GHz Silver) | PSCI SMP core bring-up, GICv3 interrupt controller (INTID 27 PPI timer) |
 | **GPU** | Qualcomm Adreno 650 (670 MHz boost / 587 MHz nominal) | Mesa Freedreno (FD650, OpenGL ES 3.2) + Hakios-Metal + CoreAnimation bridge |
 | **Display** | 11.0" IPS LCD, 2880 × 1800 (16:10 aspect ratio), 144 Hz, 309 ppi | `AppleCLCD` / `IOMobileFramebuffer` / `IOSurface` over ABL `cont_splash` buffer |
-| **Touchscreen** | Novatek NT36523 on `qupv3_se4_spi` (TLMM GPIO 39 IRQ) | `tools/touch-nt36523` SPI protocol driver + digitizer/Apple Pencil translation |
+| **Touchscreen** | Novatek NT36532 on `qupv3_se4_spi` (TLMM GPIO 39 IRQ) | `tools/touch-nt36523` SPI protocol driver + digitizer/Apple Pencil translation |
 | **Audio** | Quad stereo speakers (4x Awinic AW882xx / CS35L41 Smart PAs) + WCD938x codec | ADSP AudioReach firmware loader + CoreAudio HAL output plugin |
 | **Wi-Fi** | Qualcomm FastConnect 6900 / QCA6390 (Wi-Fi 6, 802.11ax) over PCIe | FreeBSD LinuxKPI + Linux `ath11k` driver integrated into kernel |
 | **Bluetooth** | Qualcomm Bluetooth 5.2 over UART @ 921600 / 3200000 baud | `libpipa-bt.dylib` userspace transport bridge + firmware patch loader |
@@ -32,17 +32,17 @@ Apple's open-source XNU kernel running on bare metal on the Xiaomi Pad 6, bootin
 | Subsystem | Status | Progress | Notes |
 | --- | --- | --- | --- |
 | **Boot Chain** | ✅ Operational | 100% | Stock ABL → `fastboot boot` shim → XNU Mach-O → HFS+ root on UFS |
-| **Tablet SpringBoard** | ✅ Operational | 95% | iPadOS tablet interface, dock, landscape/portrait launcher, multitasking |
-| **GPU Acceleration** | ✅ Operational | 85% | Adreno 650 GMU power-up, Mesa Freedreno + CoreAnimation bridge; blur & transparency |
-| **Touch & Stylus** | ✅ Operational | 90% | Novatek NT36523 65-byte protocol, multi-touch gestures, stylus coordinate mapping |
-| **Display Pipeline** | ✅ Operational | 95% | 2880×1800 native 16:10 canvas, TE-synced double buffering, tear-free page flips |
+| **iOS SpringBoard** | ✅ Operational | 90% | iOS phone interface, dock, landscape/portrait launcher, multitasking |
+| **GPU Acceleration** | 🚧 In Progress | 50% | Adreno 650 GMU power-up, Mesa Freedreno + CoreAnimation bridge; blur & transparency |
+| **Touch & Stylus** | ✅ Operational | 90% | CSOT msm_drm.dsi_display0=qcom,mdss_dsi_m82_42_02_0b_dual_dphy_video and Novatek NT36532 is working:|
+| **Display Pipeline** | ✅ Operational | 90% | 2880×1800 native 16:10 canvas, TE-synced double buffering, tear-free page flips |
 | **Wi-Fi (ath11k)** | ✅ Operational | 90% | QCA6390 / WCN6851 PCIe scan, WPA2/WPA3 association, Safari web browsing |
-| **Bluetooth** | ✅ Operational | 85% | UART HCI transport, A2DP audio streaming, peripheral pairing persistence |
-| **Audio Playback** | ✅ Operational | 80% | Quad speaker array driven by ADSP + AW882xx/CS35L41 HAL plugin |
+| **Bluetooth** | ⏸️ Parked || 0% | UART HCI transport, A2DP audio streaming, peripheral pairing persistence |
+| **Audio Playback** | ⏸️ Parked | 0% | Quad speaker array driven by ADSP + AW882xx/CS35L41 HAL plugin |
 | **Hardware Buttons** | ✅ Operational | 100% | PM8150 PON power key and volume rockers produce HID consumer events |
 | **Storage / Root** | ✅ Operational | 100% | Read/write journaled HFS+ volume mounted from UFS `userdata` partition |
-| **Battery / Fuel Gauge**| 🚧 In Progress | 40% | Static 100% indicator; PM8150B fuel-gauge register readout in development |
-| **Sleep / Suspend** | ⏸️ Parked | 10% | Panel blanking on lock; deep SoC sleep (RPMh) pending |
+| **Battery / Fuel Gauge**| ⏸️ Parked | 0% | Static 100% indicator; PM8150B fuel-gauge register readout in development |
+| **Sleep / Suspend** | ⏸️ Parked | 0% | Panel blanking on lock; deep SoC sleep (RPMh) pending |
 
 ---
 
