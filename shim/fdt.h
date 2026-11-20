@@ -1,6 +1,9 @@
 #pragma once
 #include <stdint.h>
 
+/* Size of the live FDT, including its header, or zero for an invalid header. */
+uint32_t fdt_blob_size(uintptr_t fdt);
+
 /* Read a u32/u64 (cell-size agnostic) property of /chosen. Returns 0 if absent. */
 int fdt_chosen_u64(uintptr_t fdt, const char *prop, uint64_t *out);
 

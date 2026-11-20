@@ -16,6 +16,14 @@ static uint32_t be32(uintptr_t a)
 	return __builtin_bswap32(*(volatile uint32_t *)a);
 }
 
+uint32_t fdt_blob_size(uintptr_t fdt)
+{
+	if (!fdt || be32(fdt) != FDT_MAGIC)
+		return 0;
+	uint32_t bytes = be32(fdt + 4);
+	return bytes >= 40 ? bytes : 0;
+}
+
 static int streq(const char *a, const char *b)
 {
 	while (*a && *a == *b)

@@ -1,0 +1,342 @@
+--- a/bsd/dev/sweet_display.c
++++ b/bsd/dev/sweet_display.c
+@@ -26,6 +26,7 @@
+ #include <sys/systm.h>
+ #include <kern/clock.h>
+ #include <pexpert/pexpert.h>
++#include <pexpert/device_tree.h>
+ #include <machine/machine_routines.h>
+ 
+ extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
+@@ -42,6 +43,7 @@
+     vm_offset_t va[3]);
+ bool sweet_flip(uint64_t phys, uint32_t stride);
+ bool sweet_flip_latched(void);
++bool sweet_flip_has_separate_buffers(void);
+ uint32_t sweet_flip_frame_count(void);
+ 
+ static inline uint32_t
+@@ -57,6 +59,7 @@
+ }
+ 
+ #define INTF_PHYS               0x0ae6b800UL
++#define PIPA_INTF2_PHYS         0x0ae6c000UL
+ #define INTF_SIZE               0x2c0UL
+ #define INTF_FRAME_COUNT        0x0ac
+ 
+@@ -64,6 +67,10 @@
+ #define CTL_STRIDE              0x200UL
+ #define CTL_SIZE                0x1e0UL
+ #define CTL_COUNT               6
++#define CTL_LAYER0              0x000
++#define CTL_LAYER1              0x004
++#define CTL_PIPA_VIG_MASK       0x03f
++#define CTL_PIPA_INTERFACES     ((1u << 1) | (1u << 2))
+ #define CTL_TOP                 0x014
+ #define CTL_FLUSH               0x018
+ #define CTL_INTF_ACTIVE         0x0f4
+@@ -80,6 +87,9 @@
+ 	{ "VIG0", 0x05000, 0 }, { "VIG1", 0x07000, 1 }, { "VIG2", 0x09000, 2 }, { "VIG3", 0x0b000, 18 },
+ 	{ "DMA0", 0x25000, 11 }, { "DMA1", 0x27000, 12 }, { "DMA2", 0x29000, 24 }, { "DMA3", 0x2b000, 25 },
+ };
++#define SSPP_SRC_SIZE           0x00
++#define SSPP_SRC_XY             0x08
++#define SSPP_SRC_FORMAT         0x30
+ #define SSPP_SRC0_ADDR          0x14
+ #define SSPP_SRC_YSTRIDE0       0x24
+ 
+@@ -102,6 +112,10 @@
+ static uint32_t flip_bit;
+ static uint32_t pipe_stride;            /* (0159) the stride the pipe has now */
+ static bool ready;
++static bool pipa_separate;
++static vm_offset_t pipa_intf2, pipa_pipes[2];
++static uint32_t pipa_issued_at[2];
++static uint64_t pipa_frame_pa[3];
+ 
+ static void
+ find_ctl(void)
+@@ -166,6 +180,116 @@
+ }
+ 
+ /*
++ * Pipa uses the two VIG pipes on the same CTL. Keep the inherited register
++ * configuration, including stride and format, and require both halves.
++ */
++static int
++pipa_flip_init(uint64_t fb_phys, uint32_t stride, uint32_t height, uint32_t *frame_stride,
++    uint64_t pa[3], vm_offset_t va[3])
++{
++	const uint32_t half_width = 900;
++	const uint32_t frame_height = 2880;
++	const uint64_t dma_limit = 0x100000000ull;
++	const void *prop = NULL;
++	unsigned int size = 0;
++	DTEntry chosen;
++	uint64_t pool[2];
++
++	if (fb_phys != DISPLAY_RESERVED_PHYS || stride != half_width * 2 * 4 || height != frame_height) {
++		printf("PIPA FLIP: unexpected splash geometry, keeping legacy presentation\n");
++		return 0;
++	}
++	if (SecureDTLookupEntry(NULL, "/chosen", &chosen) != kSuccess ||
++	    SecureDTGetProperty(chosen, "pipa-scanout-pool", &prop, &size) != kSuccess ||
++	    size != sizeof(pool)) {
++		printf("PIPA FLIP: shim did not provide a scanout pool\n");
++		return 0;
++	}
++	memcpy(pool, prop, sizeof(pool));
++	uint64_t bytes = ((uint64_t)stride * height + PAGE_SIZE - 1) & ~(uint64_t)(PAGE_SIZE - 1);
++	uint64_t start = pool[0], length = pool[1];
++	if (start < 0x80000000ull || start >= dma_limit || (start & (PAGE_SIZE - 1)) ||
++	    length < 3 * bytes || length > dma_limit - start ||
++	    (start < fb_phys + DISPLAY_RESERVED_SIZE && fb_phys < start + length)) {
++		printf("PIPA FLIP: unusable scanout pool base=%#llx size=%#llx\n", start, length);
++		return 0;
++	}
++
++	mdp = ml_io_map_unmappable(MDP_PHYS, MDP_SIZE, VM_WIMG_IO);
++	intf = ml_io_map(INTF_PHYS, INTF_SIZE);
++	pipa_intf2 = ml_io_map(PIPA_INTF2_PHYS, INTF_SIZE);
++	if (!mdp || !intf || !pipa_intf2) {
++		printf("PIPA FLIP: display registers unavailable\n");
++		return 0;
++	}
++	for (unsigned int half = 0; half < 2; half++) {
++		vm_offset_t pipe = mdp + sspp_table[half].offset;
++		if (rd(pipe + SSPP_SRC0_ADDR) != fb_phys ||
++		    (rd(pipe + SSPP_SRC_YSTRIDE0) & 0xffff) != stride ||
++		    rd(pipe + SSPP_SRC_SIZE) != ((height << 16) | half_width) ||
++		    rd(pipe + SSPP_SRC_XY) != half * half_width ||
++		    rd(pipe + SSPP_SRC_FORMAT) != 0x237ff) {
++			printf("PIPA FLIP: unexpected VIG%u splash configuration\n", half);
++			return 0;
++		}
++		pipa_pipes[half] = pipe;
++	}
++	int ctl = -1;
++	for (int n = 0; n < CTL_COUNT; n++) {
++		ctl_base[n] = ml_io_map(CTL_PHYS + CTL_STRIDE * (uint32_t)n, CTL_SIZE);
++		vm_offset_t regs = ctl_base[n];
++		if (!regs) {
++			continue;
++		}
++		uint32_t active = rd(regs + CTL_INTF_ACTIVE);
++		uint32_t left = rd(regs + CTL_LAYER0) & CTL_PIPA_VIG_MASK;
++		uint32_t right = rd(regs + CTL_LAYER1) & CTL_PIPA_VIG_MASK;
++		printf("PIPA FLIP: ctl%d active=%#x layers=%#x/%#x\n", n, active, left, right);
++		/* Known ABL topology: mixer 0 VIG0 and mixer 1 VIG1 in the same stage. */
++		if ((active & CTL_PIPA_INTERFACES) == CTL_PIPA_INTERFACES &&
++		    left == 0x5 && right == 0x28) {
++			if (ctl >= 0) {
++				printf("PIPA FLIP: ambiguous split CTL\n");
++				return 0;
++			}
++			ctl = n;
++		}
++	}
++	if (ctl < 0 || smmu_blocks()) {
++		printf("PIPA FLIP: no shared CTL or display SMMU prevents physical scanout\n");
++		return 0;
++	}
++	for (int f = 0; f < 3; f++) {
++		pa[f] = start + (uint64_t)f * bytes;
++		va[f] = ml_io_map_unmappable((vm_offset_t)pa[f], (vm_size_t)bytes, VM_WIMG_WCOMB);
++		if (!va[f]) {
++			printf("PIPA FLIP: cannot map frame %d\n", f);
++			return 0;
++		}
++		pipa_frame_pa[f] = pa[f];
++	}
++	/* The retired initrd contains payload bytes until we initialize the frames. */
++	for (int f = 0; f < 3; f++) {
++		bzero((void *)va[f], (size_t)bytes);
++	}
++
++	ctl_driving = ctl;
++	flip_bit = (1u << sspp_table[0].flush_bit) | (1u << sspp_table[1].flush_bit);
++	pipe_stride = *frame_stride = stride;
++	pipa_separate = true;
++	ready = true;
++	printf("PIPA FLIP: three separate frames at %#llx, %llu bytes each, VIG0+VIG1 on CTL%d\n",
++	    start, bytes, ctl);
++	return 3;
++}
++
++bool
++sweet_flip_has_separate_buffers(void)
++{
++	return pipa_separate;
++}
++
++/*
+  * Ready the flips: the pipe that scans `fb_phys`, the CTL that drives INTF_1, the SMMU; the boot framebuffer (frame 0) and
+  * two frames behind it in the display's reservation, mapped write-combined into va[1], va[2] (va[0] is the caller's).
+  * The number of frames (3), or 0: no flips (nothing was written to the display).
+@@ -186,6 +310,11 @@
+ 	if (fb_phys != DISPLAY_RESERVED_PHYS || stride == 0 || stride > 0xffff || height == 0) {
+ 		printf("SWEET FLIP: the framebuffer is at %#llx, not at the display's reservation: no flips\n", fb_phys);
+ 		return 0;
++	}
++	uint32_t pipa = 0;
++	(void)PE_parse_boot_argn("pipaflip", &pipa, sizeof(pipa));
++	if (pipa) {
++		return pipa_flip_init(fb_phys, stride, height, frame_stride, pa, va);
+ 	}
+ 	bytes = ((uint64_t)gpu_stride * height + PAGE_SIZE - 1) & ~(uint64_t)(PAGE_SIZE - 1);
+ 	if (3 * bytes > DISPLAY_RESERVED_SIZE) {
+@@ -243,6 +372,22 @@
+ 	if (!ready || phys >= (1ull << 32) || (phys & 0xff) != 0 || stride == 0 || stride > 0xffff) {
+ 		return false;
+ 	}
++	if (pipa_separate) {
++		if (stride != pipe_stride ||
++		    (phys != pipa_frame_pa[0] && phys != pipa_frame_pa[1] && phys != pipa_frame_pa[2])) {
++			return false;
++		}
++		/* Commit both source addresses with one flush on the shared CTL. */
++		__asm__ volatile ("dsb sy" : : : "memory");
++		wr(pipa_pipes[0] + SSPP_SRC0_ADDR, (uint32_t)phys);
++		wr(pipa_pipes[1] + SSPP_SRC0_ADDR, (uint32_t)phys);
++		__asm__ volatile ("dsb sy" : : : "memory");
++		wr(ctl_base[ctl_driving] + CTL_FLUSH, flip_bit);
++		__asm__ volatile ("dsb sy" : : : "memory");
++		pipa_issued_at[0] = rd(intf + INTF_FRAME_COUNT);
++		pipa_issued_at[1] = rd(pipa_intf2 + INTF_FRAME_COUNT);
++		return true;
++	}
+ 	b = mdp + sspp_table[sspp_found].offset;
+ 	if (stride != pipe_stride) {
+ 		/* (0159) taken with the address at the same frame start (dpu_hw_sspp_setup_sourceaddress / _setup_rects) */
+@@ -259,7 +404,12 @@
+ bool
+ sweet_flip_latched(void)
+ {
+-	return ready && (rd(ctl_base[ctl_driving] + CTL_FLUSH) & flip_bit) == 0;
++	if (!ready || (rd(ctl_base[ctl_driving] + CTL_FLUSH) & flip_bit) != 0) {
++		return false;
++	}
++	/* Don't reuse the old buffer until both halves crossed a frame boundary. */
++	return !pipa_separate || (rd(intf + INTF_FRAME_COUNT) != pipa_issued_at[0] &&
++	    rd(pipa_intf2 + INTF_FRAME_COUNT) != pipa_issued_at[1]);
+ }
+ 
+ /* the frames the panel has started (INTF_1's counter), for the stats */
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -127,6 +127,7 @@
+     vm_offset_t va[3]);
+ extern "C" bool sweet_flip(uint64_t phys, uint32_t stride);
+ extern "C" bool sweet_flip_latched(void);
++extern "C" bool sweet_flip_has_separate_buffers(void);
+ 
+ #if defined(SWEET)
+ #include <IOKit/IOService.h>
+@@ -254,6 +255,7 @@
+ 	bool          fSmooth;                  /* (0155) sweetfb_smooth, default 1 */
+ 	/* (xnu 0156) page flips: frame 0 is the boot framebuffer (fPixels) */
+ 	int           fFlipCount;               /* 3, or 0: no flips */
++	bool          fSeparateScanout;          /* Pipa: fSurface is never a flip target */
+ 	uint64_t      fFlipPA[3];
+ 	vm_offset_t   fFlipVA[3];
+ 	int           fFlipFront, fFlipPending; /* the frame the panel scans; the one flipped to and not yet taken (-1) */
+@@ -505,15 +507,19 @@
+ 	fFlipFront = 0;
+ 	fFlipPending = -1;
+ 	fFlipCount = fPixels != 0 ? sweet_flip_init(fPhys, fRowBytes, fHeight, &fFlipStride, fFlipPA, fFlipVA) : 0;
++	fSeparateScanout = fFlipCount == 3 && sweet_flip_has_separate_buffers();
++	if (fSeparateScanout) {
++		fFlipFront = -1;  /* firmware still scans its original splash buffer */
++	}
+ 	/* (xnu 0159) the frames as surfaces the GPU can draw into */
+ 	int scanOn = 1;
+ 	PE_parse_boot_argn("sweetscan", &scanOn, sizeof(scanOn));
+-	fScanReady = fFlipCount == 3 && scanOn != 0;
++	fScanReady = fFlipCount == 3 && !fSeparateScanout && scanOn != 0;
+ 	for (int f = 0; f < 3 && fScanReady; f++) {
+ 		fFlipSurf[f] = sweet_surface_create_physical(fFlipPA[f], fWidth, fHeight, fFlipStride, SWEET_FB_FORMAT_BGRA);
+ 		fScanReady = fFlipSurf[f] != NULL;
+ 	}
+-	if (fFlipCount == 3) {
++	if (fFlipCount == 3 && !fSeparateScanout) {
+ 		IOLog("SWEET FB: GPU scaling %s (frames %u, %u, %u; rows of %u)\n", fScanReady ? "offered" :
+ 		    scanOn ? "NOT offered: no surfaces" : "not offered (sweetscan=0)", fFlipSurf[0] ? fFlipSurf[0]->id : 0,
+ 		    fFlipSurf[1] ? fFlipSurf[1]->id : 0, fFlipSurf[2] ? fFlipSurf[2]->id : 0, fFlipStride);
+@@ -731,7 +737,8 @@
+ 		 * to be (the last flip settled first: at most a refresh); else the scanned one, as before.
+ 		 */
+ 		int target = -1, gpuFrame = -1;
+-		if (fFlipCount == 3 && coversDisplay(rec)) {
++		bool full = fFlipCount == 3 && coversDisplay(rec);
++		if (fFlipCount == 3 && (full || fSeparateScanout)) {
+ 			/* (xnu 0159) a frame the GPU has already scaled this swap's picture into: its only layer is that surface */
+ 			uint32_t mask = get32(rec, 0x104), layer0 = (mask & 1u) ? get32(rec, 0x54) : 0, newest = 0;
+ 			bool only0 = layer0 != 0;
+@@ -774,19 +781,28 @@
+ 				IOLockUnlock(fLock);
+ 			}
+ 		}
+-		bool shown;
++		bool shown = false;
+ 		if (gpuFrame >= 0) {
+ 			/* (0159) nothing to copy: once the GPU has finished drawing the frame, it is flipped to */
+ 			shown = sweet_gpu_surface_ready(fFlipSurf[gpuFrame]->id, NULL, 0);
+-		} else {
++		} else if (!fSeparateScanout || target >= 0) {
+ 			fDraw = target >= 0 ? fFlipVA[target] : fFlipCount ? fFlipVA[fFlipPending >= 0 ? fFlipPending : fFlipFront] : fPixels;
+ 			fDrawRow = target >= 0 || (fFlipCount && fFlipPending >= 0) ? fFlipStride : fFlipCount ? fFrontStride : fRowBytes;
++			if (fSeparateScanout && !full) {
++				/* Preserve undamaged pixels in an offscreen frame. */
++				uintptr_t front = fFlipFront < 0 ? fPixels : fFlipVA[fFlipFront];
++				for (uint32_t y = 0; y < fHeight; y++) {
++					memcpy((void *)(fDraw + (uint64_t)y * fDrawRow),
++					    (const void *)(front + (uint64_t)y * fFrontStride), fWidth * 4);
++				}
++			}
+ 			shown = present(rec);
+ 		}
+ 		int flipTo = gpuFrame >= 0 ? gpuFrame : target;
+ 		if (flipTo >= 0) {
+ 			IOLockLock(fLock);
+-			if (shown && fFlipPending < 0 && sweet_flip(fFlipPA[flipTo], fFlipStride)) {
++			if (shown && fFlipPending < 0 && (!fSeparateScanout || !fPowerOff) &&
++			    sweet_flip(fFlipPA[flipTo], fFlipStride)) {
+ 				fFlipPending = flipTo;
+ 				fStatFlips++;
+ 				if (gpuFrame >= 0) {
+@@ -801,6 +817,7 @@
+ 				fFlipOwner[flipTo] = SWEET_SCAN_FREE;
+ 			} else if (gpuFrame < 0) {
+ 				fFlipOwner[flipTo] = SWEET_SCAN_FREE;  /* (a queued frame stays queued: tried again) */
++				shown = shown && !fSeparateScanout;
+ 			}
+ 			IOLockUnlock(fLock);
+ 		}
+@@ -839,6 +856,9 @@
+ AppleCLCD::settleFlip(void)
+ {
+ 	if (fFlipPending >= 0 && sweet_flip_latched()) {
++		if (fSeparateScanout && fFlipFront < 0) {
++			IOLog("PIPA FLIP: first frame latched on both interfaces\n");
++		}
+ 		fFlipFront = fFlipPending;
+ 		fFrontStride = fFlipStride;
+ 		fFlipPending = -1;
+@@ -1089,7 +1109,7 @@
+ 			continue;
+ 		}
+ 		s = sweet_surface_copy(id);
+-		ready = s == NULL || s == fSurface || s->memory == NULL ||
++		ready = s == NULL || (!fSeparateScanout && s == fSurface) || s->memory == NULL ||
+ 		    sweet_gpu_surface_ready(id, (void *)s->kernelAddress(), s->memory->getLength());
+ 		OSSafeReleaseNULL(s);
+ 		if (!ready) {
+@@ -1141,7 +1161,7 @@
+ 			    s ? s->pixelFormat : 0, s ? s->bytesPerRow : 0, sx, sy, get32(a, 8),
+ 			    get32(a, 12), dx, dy, w, h);
+ 		}
+-		if (s == NULL || s == fSurface) {
++		if (s == NULL || (!fSeparateScanout && s == fSurface)) {
+ 			OSSafeReleaseNULL(s);
+ 			continue;
+ 		}

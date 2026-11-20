@@ -140,6 +140,18 @@ def adt_dram(adt_blob):
             struct.unpack('<Q', chosen.prop('dram-size'))[0])
 
 
+def add_pipa_scanout_slot(adt_blob):
+    """Give the Pipa shim a fixed-size slot for the bootloader's recycled initrd range."""
+    root, _ = adt.parse(adt_blob)
+    if not root.children or root.children[0].name != 'chosen':
+        raise ValueError('pipaflip=1 requires /chosen to be the first ADT child')
+    chosen = root.children[0]
+    name = 'pipa-scanout-pool'
+    chosen.props = [prop for prop in chosen.props if prop[0] != name]
+    chosen.props.append((name, 0, bytes(16)))
+    return adt.serialize(root)
+
+
 def build(kernel_path, adt_path, cmdline, ramdisk_path=None):
     buf = bytearray(open(kernel_path, 'rb').read())
     m = parse_macho(buf)
@@ -154,6 +166,8 @@ def build(kernel_path, adt_path, cmdline, ramdisk_path=None):
     kernel_end = (kernel_end + PAGE - 1) & ~(PAGE - 1)
 
     adt_blob = open(adt_path, 'rb').read()
+    if 'pipaflip=1' in cmdline.split():
+        adt_blob = add_pipa_scanout_slot(adt_blob)
     # The ADT decides where the kernel's RAM is (mkadt.py --highmem).
     PHYS_BASE, MEM_SIZE = adt_dram(adt_blob)
     pieces = [(s['vmaddr'], s['vmsize'], buf[s['fileoff']:s['fileoff'] + s['filesize']]) for s in segs]

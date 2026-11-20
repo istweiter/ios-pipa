@@ -14,6 +14,9 @@
 
 #define BOOT_LINE_LENGTH	608
 #define PAGE_16K		0x4000UL
+#define PIPA_SPLASH_BYTES	0x2300000UL
+
+extern char _head[], _end[];
 
 struct payload_seg {
 	uint64_t vmaddr, vmsize, file_off, file_size;
@@ -74,6 +77,88 @@ static int magic_ok(const char *m)
 	return 1;
 }
 
+static int overlaps(uint64_t base, uint64_t end, uint64_t other_base, uint64_t other_end)
+{
+	return base < other_end && other_base < end;
+}
+
+/* The source initrd is dead after all payload segments and the ADT have been
+ * copied. It was reserved by ABL and is outside XNU's managed RAM. Give its
+ * first three aligned frames to the DPU only if it can address them.
+ */
+static uint64_t scanout_base(uintptr_t dtb, uint64_t rd_start, uint64_t rd_end, uint64_t bytes)
+{
+	uint32_t dtb_size = fdt_blob_size(dtb);
+	if (rd_start < 0x80000000UL || rd_end > 0x100000000UL ||
+	    rd_start >= rd_end || !dtb_size)
+		return 0;
+	uint64_t base = (rd_start + PAGE_16K - 1) & ~(PAGE_16K - 1);
+	uint64_t end = base + bytes;
+	if (end > rd_end ||
+	    overlaps(base, end, dtb, dtb + dtb_size) ||
+	    overlaps(base, end, (uintptr_t)_head, (uintptr_t)_end) ||
+	    overlaps(base, end, FB_BASE, FB_BASE + PIPA_SPLASH_BYTES))
+		return 0;
+	return base;
+}
+
+static int adt_string_equal(const char *data, const char *key)
+{
+	while (*key && *data == *key)
+		data++, key++;
+	return *data == *key;
+}
+
+/* mkadt.py puts /chosen first. ADT property data is only four-byte aligned. */
+static uintptr_t adt_properties(uintptr_t node, uintptr_t end, uintptr_t *pool, int *is_chosen)
+{
+	if (node > end || end - node < 8)
+		return 0;
+	uint32_t count = *(const uint32_t *)node;
+	uintptr_t p = node + 8;
+	for (uint32_t i = 0; i < count; i++) {
+		if (end - p < 36)
+			return 0;
+		const char *name = (const char *)p;
+		uint32_t bytes = *(const uint32_t *)(p + 32) & 0x7fffffffU;
+		uint64_t padded = ((uint64_t)bytes + 3) & ~3UL;
+		uintptr_t value = p + 36;
+		if (padded > end - value)
+			return 0;
+		if (pool && bytes == 16 && adt_string_equal(name, "pipa-scanout-pool"))
+			*pool = value;
+		if (is_chosen && bytes == 7 && adt_string_equal(name, "name") &&
+		    adt_string_equal((const char *)value, "chosen"))
+			*is_chosen = 1;
+		p = value + padded;
+	}
+	return p;
+}
+
+static void adt_set_scanout_pool(uintptr_t adt, uint64_t adt_size, uintptr_t dtb,
+				uint64_t rd_start, uint64_t rd_end)
+{
+	if (adt_size > UINTPTR_MAX - adt)
+		return;
+	uint64_t frame = ((uint64_t)FB_STRIDE * FB_H + PAGE_16K - 1) & ~(PAGE_16K - 1);
+	uint64_t bytes = 3 * frame;
+	uint64_t base = scanout_base(dtb, rd_start, rd_end, bytes);
+	if (!base)
+		return;
+	uintptr_t end = adt + adt_size;
+	uintptr_t child = adt_properties(adt, end, 0, 0);
+	uintptr_t slot = 0;
+	int is_chosen = 0;
+	if (!child || !adt_properties(child, end, &slot, &is_chosen) || !is_chosen || !slot)
+		return;
+	volatile uint32_t *range = (volatile uint32_t *)slot;
+	range[0] = (uint32_t)base;
+	range[1] = 0;
+	range[2] = (uint32_t)bytes;
+	range[3] = 0;
+	con_hex2("SCANOUT", "base=", base, "size=", bytes);
+}
+
 typedef void (*xnu_entry_t)(uint64_t boot_args_pa);
 
 const char *loader_boot(uintptr_t dtb)
@@ -112,6 +197,7 @@ const char *loader_boot(uintptr_t dtb)
 	/* ADT, then boot_args, behind the kernel; everything below topOfKernelData is ours. */
 	uintptr_t adt_pa = p->kernel_end + pa_of_va_base;
 	copy64(adt_pa, rd_start + p->adt_off, p->adt_size);
+	adt_set_scanout_pool(adt_pa, p->adt_size, dtb, rd_start, rd_end);
 	uintptr_t ba_pa = (adt_pa + p->adt_size + PAGE_16K - 1) & ~(PAGE_16K - 1);
 	uintptr_t top = ba_pa + PAGE_16K;
 
