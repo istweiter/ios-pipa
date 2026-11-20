@@ -5,6 +5,7 @@
 //! string, and no call unwinds into C.
 
 use metal2vulkan::bind::SamplerDescriptor;
+use metal2vulkan::device::PaddedReadsPolicy;
 use metal2vulkan::metal::state::{DepthStencilDescriptor, StencilDescriptor};
 use metal2vulkan::library::{FunctionConstantValue, FunctionConstantValues};
 use metal2vulkan::metal::{
@@ -167,9 +168,15 @@ pub unsafe extern "C" fn nmb_device_open(loader: *const c_char, cache: *const c_
         let mut options = DeviceOptions::default();
         options.loader = Some(PathBuf::from(loader.to_string_lossy().into_owned()));
         options.metal_level = Some(MetalLevel::NEWEST);
-        // Render padded IOSurface rows in place when recorded 16x4 GMEM tile-store bounds fit (`0008` + `0016`),
-        // and skip encoder replay-call logging since this frontend never calls `rebind_bytes_no_copy` (`0013`).
-        options.policy.padded_reads = metal2vulkan::device::PaddedReadsPolicy::AliasWrites;
+        // Keep the default in-place path. The diagnostic switch makes padded writers use
+        // the runtime's copy-in/copy-back image while keeping the existing read alias path.
+        options.policy.padded_reads =
+            if matches!(std::env::var("SWEET_M2V_SHADOW_PADDED_WRITES").as_deref(), Ok("1")) {
+                PaddedReadsPolicy::Alias
+            } else {
+                PaddedReadsPolicy::AliasWrites
+            };
+        // This frontend never calls rebind_bytes_no_copy.
         options.refuse_rebinds = true;
         options.shader_cache = metal2vulkan_runtime::ShaderCacheOptions::in_directory(cache.to_string_lossy().into_owned());
         options.messages = Some(MessageSink::new(observe_message));
