@@ -285,3 +285,25 @@
 - Reduced the workspace from 41 GiB to 21 GiB. Removed generated research/ios-root/ios16-root.simg only after a read-only sparse-image decode matched every byte of the retained authoritative 16 GiB ios16-root.img; the sparse copy can be recreated with img2simg.
 - Pruned stale ignored build outputs: prior builds/ snapshots except pipa-metal2-probe-44681040981; old xnu/out/stage-* and run-* snapshots except latest run 44550393603; and archived shim/out/shim-boot-pipa-* / payload-pipa-* images. Kept current shim/out/payload.bin and shim-boot.img, XNU kernel artifacts/source downloads, current Metal2 probe snapshot, and all research/firmware inputs.
 - Removed shim/out/ramdisk.bin after confirming it was byte-for-byte identical to the retained payload; shim/build.sh recreates it. No tracked source files, firmware, IPSW DMGs, or the raw iOS root image were deleted.
+
+
+## Separate iPadOS root candidate (2026-11-20)
+- Used the iPad Pro 12.9-inch (1st generation, iPad6,7 Wi-Fi) iPadOS 16.7.16 restore IPSW, build 20H392, matching the existing iPhone X iOS build. Apple lists iPadOS 16.7.16 for this device family and the same build number as iOS 16.7.16.
+- Extracted the IPSW BuildManifest and OS/SystemOS/AppOS DMGs to research/ipados-ipsw/iPad6_7-20H392/; remotezip verified CRC-32 for all three DMGs.
+- Built a separate 16 GiB HFS+ image at research/ipados-root/ipados16-root.img using the existing generic tools/mkiosroot.sh, then applied tools/sweet-root-tweaks.py. The SystemVersion plist reads 16.7.16 / 20H392; launchd.plist and both Cryptex trees are present. SHA-256: 8a56b6065650ee422daf5265ae6d0c4b46b1136caaa56f58e8971bcb7eb3a33f.
+- Linux fsck.hfsplus -f -n reports only "Volume header needs minor repair" for this fresh journaled HFS+ image; it reports the same on the existing iOS root, matching the known Linux HFS+ behavior above. The root mounted read-only for inspection and writable for the standard SWEET tweaks. sweet-root-tweaks.py noted that the image has no mobileactivationd system container and skipped the optional activation data ark.
+- This is a local alternate root candidate only. It has not been booted or written to userdata; switching the device to it requires a separate root-install decision. The user's uncommitted README.md edit was left untouched.
+- Converted the retained raw iPadOS candidate with img2simg to C:\\Temp\\ipados16-root.simg. The output is Android sparse v1 with 4,194,304 4096-byte output blocks (16 GiB) across 23,305 chunks; file identifies it as a sparse image. The raw image remains available, and no fastboot command or userdata write was executed by Codex.
+
+
+## iPadOS identity correction and UI follow-up (2026-11-20)
+- User reports the iPadOS-root test still shows a phone-style UI and Settings will not open. The current temporary-shim payload still identified as D22AP / iPhone10,3, and its /product properties said iPhone X / phone, although the UFS root candidate came from iPadOS 16.7.16.
+- Decoded DeviceTree.j98aap.im4p from the iPad6,7 restore IPSW. Its identity is J98aAP / iPad6,7; /product says iPad Pro and artwork-device-idiom=pad. This confirms the prior root-only build was paired with the wrong product identity in ADT, consistent with the phone-style UI.
+- Created a staged ADT by changing only root model/compatibility/target identity and /product properties in the existing payload. Preserved the existing kernel bytes, Pipa hardware nodes, diagnostic and Sileo file entries, boot arguments, and rd=ufsroot0. New ADT SHA-256 267206ab128f4bc2333efedee972b47961d6b8610e5969a317ac1605c6e2178e; payload SHA-256 f2705a05f434b8f3877cd53c648ec8478e1b3a169ba7942b5f74ebd7c65cebb0.
+- Built temporary Android boot image /mnt/c/Temp/shim-boot-pipa-ipados-identity-20261120.img; SHA-256 e6aafd41163d2d5acf870f45d9960f3e005a09fc203edd450bab2be4260d1c02. Header v2 is verified and the extracted ramdisk matches the intended payload byte-for-byte. No XNU rebuild or permanent partition write was performed by Codex; use fastboot boot only. Hardware result pending.
+- Preferences.app is present in the candidate root. The old iPhone identity may also explain its launch failure, but that is not established; if it still fails with the corrected ADT, inspect a fresh Settings crash report before changing root files.
+
+
+## iPadOS identity image: latest user report (2026-11-20)
+- The user reports no visible UI change after the latest boot attempt; Wi-Fi appeared and Settings still does not open. The exact shim and root used have not yet been verified, so this does not confirm or reject the corrected J98aAP ADT image.
+- Next step is to confirm which shim booted and which root is on userdata, then inspect fresh identity/root-selection output and a Settings crash report if it still fails. No root or launchd edits are authorized by this observation.
