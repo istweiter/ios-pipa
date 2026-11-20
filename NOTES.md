@@ -1471,3 +1471,10 @@ The 2026-10-14 … 2026-10-18 session logs (first XNU boots, iOS root image vers
 - The purge did not run: dpkg reported that `sh`, `rm`, `tar`, `diff`, and `dpkg-deb` were absent from PATH. The runner appended a duplicate PATH entry; dpkg used the earlier default path and exited before package removal.
 - Confirmed the Procursus bootstrap has executable `/var/jb/usr/bin/env` and all five helper programs. Updated `sileo-purge-run.txt` to use `/var/jb/usr/bin/env -i PATH=...` before dpkg, avoiding the duplicate inherited PATH. Added both `env` and `dpkg` to `sweetnull` for the next boot's output.
 - Rebuilt temporary Android boot image `/mnt/c/Temp/shim-boot-pipa-sileo-depsfix-v3-44696206249.img`, SHA-256 `6295d52e77d699a3548d34d282e0646a43a5166dd0417f9c64da9ea3dda8849b`; payload SHA-256 `dd89fd24a827803bf7af15e945bde12cecb590eb1c02c05d7791f0b222d45782`. Header v2 and byte-for-byte embedded ramdisk were verified. `rd=ufsroot0`, Metal2, Wi-Fi, and Bluetooth arguments are unchanged. Hardware result pending.
+
+
+## Sileo APT fetch diagnostic image (2026-11-20)
+- User reports that refreshing Sileo sources did not resolve the generic `E: Unable to fetch some archives` message; the UI does not expose a failing URL. The shared kernel log is from before the v3 boot and contains no new fetch details.
+- Added `tools/root-files/sileo-apt-diag.txt` and `sileo-apt-diag-run.txt`. A temporary shim boot injects the existing configd run-file mechanism to invoke Procursus `apt-get update` after 30 seconds. It captures `apt-get`/environment output via `sweetnull`; no package install or removal is attempted.
+- The diagnostic uses APT's normal root-owned `/var/jb/var/lib/apt/lists`, leaving Sileo's mobile-owned `sileolists` directory and contents alone. It preserves `rd=ufsroot0`, Metal2, Wi-Fi, and Bluetooth settings.
+- Built temporary image `/mnt/c/Temp/shim-boot-pipa-sileo-apt-diag-v4-44696206249.img`, SHA-256 `4d556ce4d4a32827e8a373e8a165aa6f7460c644e047f7d0c2461f6439d31852`; payload SHA-256 `de2b9e0f250ce17f4430180902795f820e2d75ddb0303e58db9bab66893d8f24`. Android header v2 and byte-for-byte embedded ramdisk verified. Hardware result pending.

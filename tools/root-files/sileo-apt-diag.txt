@@ -1,0 +1,3 @@
+# One boot only: refresh repository metadata and capture APT's actual errors.
+# This does not install or remove packages. It keeps Sileo's mobile-owned lists separate.
+/private/var/sweet-metal/run=tools/root-files/sileo-apt-diag-run.txt 0:0:0644
