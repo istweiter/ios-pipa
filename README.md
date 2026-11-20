@@ -33,11 +33,11 @@ Apple's open-source XNU kernel running on bare metal on the Xiaomi Pad 6, bootin
 | --- | --- | --- | --- |
 | **Boot Chain** | ✅ Operational | 100% | Stock ABL → `fastboot boot` shim → XNU Mach-O → HFS+ root on UFS |
 | **iOS SpringBoard** | ✅ Operational | 90% | iOS phone interface, dock, landscape/portrait launcher, multitasking |
-| **GPU Acceleration** | 🚧 In Progress | 50% | Adreno 650 GMU power-up, Mesa Freedreno + CoreAnimation bridge; blur & transparency |
+| **GPU Acceleration** | 🚧 In Progress | 50% | nihuya ne rabotaet ya rot ebal etogo codex'a |
 | **Touch & Stylus** | ✅ Operational | 90% | CSOT msm_drm.dsi_display0=qcom,mdss_dsi_m82_42_02_0b_dual_dphy_video and Novatek NT36532 is working:|
 | **Display Pipeline** | ✅ Operational | 90% | 2880×1800 native 16:10 canvas, TE-synced double buffering, tear-free page flips |
 | **Wi-Fi (ath11k)** | ✅ Operational | 90% | QCA6390 / WCN6851 PCIe scan, WPA2/WPA3 association, Safari web browsing |
-| **Bluetooth** | ⏸️ Parked || 0% | UART HCI transport, A2DP audio streaming, peripheral pairing persistence |
+| **Bluetooth** | ⏸️ Parked | 0% | UART HCI transport, A2DP audio streaming, peripheral pairing persistence |
 | **Audio Playback** | ⏸️ Parked | 0% | Quad speaker array driven by ADSP + AW882xx/CS35L41 HAL plugin |
 | **Hardware Buttons** | ✅ Operational | 100% | PM8150 PON power key and volume rockers produce HID consumer events |
 | **Storage / Root** | ✅ Operational | 100% | Read/write journaled HFS+ volume mounted from UFS `userdata` partition |
