@@ -1,0 +1,2 @@
+# Sileo asks apt to use /var/jb/var/lib/apt/sileolists; Procursus bootstrap does not create it.
+/private/var/jb/var/lib/apt/sileolists/.keep=tools/root-files/sileo-lists.keep 501:501:0644
