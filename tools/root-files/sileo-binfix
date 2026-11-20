@@ -1,0 +1,10 @@
+#!/var/jb/usr/bin/sh
+set -eu
+
+for name in chmod cp mkdir mv rm; do
+	dest="/bin/$name"
+	source="/var/jb/usr/bin/$name"
+	if [ ! -e "$dest" ] && [ ! -L "$dest" ]; then
+		/var/jb/usr/bin/ln -s "$source" "$dest"
+	fi
+done

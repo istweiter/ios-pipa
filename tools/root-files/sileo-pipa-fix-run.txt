@@ -1,0 +1,3 @@
+# Add missing /bin compatibility links from Procursus before the user starts installs.
+delay 10
+/var/jb/usr/bin/sh /usr/local/bin/pipa-sileo-binfix

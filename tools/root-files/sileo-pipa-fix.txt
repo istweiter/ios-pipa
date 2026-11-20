@@ -1,0 +1,8 @@
+# Give Procursus APT its CA bundle directly; do not depend on system trustd.
+/private/var/jb/etc/apt/apt.conf.d/10pipa.conf=tools/root-files/sileo-apt-ca.conf 0:0:0644
+
+# Sileo invokes these by absolute /bin path; create only the missing links.
+/usr/local/bin/pipa-sileo-binfix=tools/root-files/sileo-binfix 0:0:0755
+
+# Replace the previous one-shot APT diagnostic with the compatibility-link setup.
+/private/var/sweet-metal/run=tools/root-files/sileo-pipa-fix-run.txt 0:0:0644
