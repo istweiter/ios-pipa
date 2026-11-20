@@ -1,0 +1,5 @@
+# libkrw0 needs libkrw0-plugin, which this custom-kernel port cannot provide.
+# Purge the unused jailbreak-only dependency chain before the user opens Sileo.
+env PATH=/var/jb/usr/bin:/var/jb/bin:/var/jb/usr/sbin:/var/jb/sbin:/usr/bin:/bin:/usr/sbin:/sbin
+delay 30
+/var/jb/usr/bin/dpkg --force-depends --purge shshd libdimentio0 libkrw0

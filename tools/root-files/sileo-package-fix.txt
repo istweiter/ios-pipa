@@ -1,0 +1,4 @@
+# One boot only: create Sileo's private package index directory and remove
+# Procursus jailbreak-only kernel-memory packages from this custom XNU port.
+/private/var/jb/var/lib/apt/sileolists/.keep=tools/root-files/sileo-lists.keep 501:501:0644
+/private/var/sweet-metal/run=tools/root-files/sileo-purge-run.txt 0:0:0644
