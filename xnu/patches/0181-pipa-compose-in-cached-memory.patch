@@ -1,0 +1,198 @@
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -256,6 +256,7 @@
+ 	/* (xnu 0156) page flips: frame 0 is the boot framebuffer (fPixels) */
+ 	int           fFlipCount;               /* 3, or 0: no flips */
+ 	bool          fSeparateScanout;          /* Pipa: fSurface is never a flip target */
++	IOBufferMemoryDescriptor *fPipaCanvas;  /* cached complete frame, including undamaged pixels */
+ 	uint64_t      fFlipPA[3];
+ 	vm_offset_t   fFlipVA[3];
+ 	int           fFlipFront, fFlipPending; /* the frame the panel scans; the one flipped to and not yet taken (-1) */
+@@ -499,18 +500,35 @@
+ 	fSmooth = fXWeight != NULL && fLine != NULL;
+ 	fLock = IOLockAlloc();
+ 	fClients = OSArray::withCapacity(4);
+-	fSurface = sweet_surface_create_physical(fPhys, fWidth, fHeight, fRowBytes, SWEET_FB_FORMAT_BGRA);
++	fFlipFront = 0;
++	fFlipPending = -1;
++	fFlipCount = sweet_flip_init(fPhys, fRowBytes, fHeight, &fFlipStride, fFlipPA, fFlipVA);
++	fSeparateScanout = fFlipCount == 3 && sweet_flip_has_separate_buffers();
++	if (fSeparateScanout) {
++		/* Never read the scanout or splash back through a write-combine mapping. */
++		uint64_t length = (uint64_t)fRowBytes * fHeight;
++		fPipaCanvas = IOBufferMemoryDescriptor::inTaskWithOptions(kernel_task,
++		    kIODirectionInOut, length, page_size);
++		if (fPipaCanvas != NULL) {
++			bzero(fPipaCanvas->getBytesNoCopy(), length);
++			fSurface = sweet_surface_create_cached_frame(fWidth, fHeight, fRowBytes, SWEET_FB_FORMAT_BGRA);
++		}
++		if (fSurface != NULL) {
++			fFlipFront = -1;  /* firmware still scans its original splash buffer */
++			IOLog("PIPA FLIP: cached default surface %u and composition canvas\n", fSurface->id);
++		} else {
++			OSSafeReleaseNULL(fPipaCanvas);
++			fSeparateScanout = false;
++			fFlipCount = 0;
++			IOLog("PIPA FLIP: cached buffers unavailable, keeping legacy presentation\n");
++		}
++	}
++	if (fSurface == NULL) {
++		fSurface = sweet_surface_create_physical(fPhys, fWidth, fHeight, fRowBytes, SWEET_FB_FORMAT_BGRA);
++	}
+ 	fPixels = fSurface != NULL ? fSurface->kernelAddress() : 0;
+-	/* (xnu 0156) the page flips' frames; without them every frame goes into fPixels as before */
+ 	fDraw = fPixels;
+ 	fDrawRow = fFrontStride = fRowBytes;
+-	fFlipFront = 0;
+-	fFlipPending = -1;
+-	fFlipCount = fPixels != 0 ? sweet_flip_init(fPhys, fRowBytes, fHeight, &fFlipStride, fFlipPA, fFlipVA) : 0;
+-	fSeparateScanout = fFlipCount == 3 && sweet_flip_has_separate_buffers();
+-	if (fSeparateScanout) {
+-		fFlipFront = -1;  /* firmware still scans its original splash buffer */
+-	}
+ 	/* (xnu 0159) the frames as surfaces the GPU can draw into */
+ 	int scanOn = 1;
+ 	PE_parse_boot_argn("sweetscan", &scanOn, sizeof(scanOn));
+@@ -528,12 +546,14 @@
+ 	if (fLock == NULL || fClients == NULL || fPixels == 0 || fWorkLoop == NULL) {
+ 		IOLog("SWEET FB: setup failed\n");
+ 		OSSafeReleaseNULL(fSurface);    /* stays published: also held by the table */
++		OSSafeReleaseNULL(fPipaCanvas);
+ 		OSSafeReleaseNULL(fWorkLoop);
+ 		return false;
+ 	}
+ 	fVsync = IOTimerEventSource::timerEventSource(this, &AppleCLCD::vsyncFired);
+ 	if (fVsync == NULL || fWorkLoop->addEventSource(fVsync) != kIOReturnSuccess) {
+ 		IOLog("SWEET FB: no vsync timer\n");
++		OSSafeReleaseNULL(fPipaCanvas);
+ 		return false;
+ 	}
+ 	uint32_t hz = 10;
+@@ -547,6 +567,7 @@
+ 	thread_t presenter = THREAD_NULL;
+ 	if (kernel_thread_start(&AppleCLCD::presentThread, this, &presenter) != KERN_SUCCESS) {
+ 		IOLog("SWEET FB: no present thread\n");
++		OSSafeReleaseNULL(fPipaCanvas);
+ 		return false;
+ 	}
+ 	thread_set_thread_name(presenter, "sweet fb present");    /* (0157) its name in SWEET TOP */
+@@ -700,6 +721,9 @@
+ 					continue;
+ 				}
+ 			}
++			if (fSeparateScanout) {
++				bzero(fPipaCanvas->getBytesNoCopy(), (uint64_t)fRowBytes * fHeight);
++			}
+ 			/* (0156) every frame black: whichever the panel scans */
+ 			for (int f = 0; f < (fFlipCount ? fFlipCount : 1); f++) {
+ 				uintptr_t frame = fFlipCount ? fFlipVA[f] : fPixels;
+@@ -785,17 +809,20 @@
+ 		if (gpuFrame >= 0) {
+ 			/* (0159) nothing to copy: once the GPU has finished drawing the frame, it is flipped to */
+ 			shown = sweet_gpu_surface_ready(fFlipSurf[gpuFrame]->id, NULL, 0);
+-		} else if (!fSeparateScanout || target >= 0) {
++		} else if (fSeparateScanout) {
++			if (target >= 0) {
++				/* All blending and partial updates stay in cached RAM. The
++				 * Pipa flip path keeps the same stride as this canvas. */
++				fDraw = (uintptr_t)fPipaCanvas->getBytesNoCopy();
++				fDrawRow = fRowBytes;
++				shown = present(rec);
++				if (shown) {
++					memcpy((void *)fFlipVA[target], (const void *)fDraw, (uint64_t)fRowBytes * fHeight);
++				}
++			}
++		} else {
+ 			fDraw = target >= 0 ? fFlipVA[target] : fFlipCount ? fFlipVA[fFlipPending >= 0 ? fFlipPending : fFlipFront] : fPixels;
+ 			fDrawRow = target >= 0 || (fFlipCount && fFlipPending >= 0) ? fFlipStride : fFlipCount ? fFrontStride : fRowBytes;
+-			if (fSeparateScanout && !full) {
+-				/* Preserve undamaged pixels in an offscreen frame. */
+-				uintptr_t front = fFlipFront < 0 ? fPixels : fFlipVA[fFlipFront];
+-				for (uint32_t y = 0; y < fHeight; y++) {
+-					memcpy((void *)(fDraw + (uint64_t)y * fDrawRow),
+-					    (const void *)(front + (uint64_t)y * fFrontStride), fWidth * 4);
+-				}
+-			}
+ 			shown = present(rec);
+ 		}
+ 		int flipTo = gpuFrame >= 0 ? gpuFrame : target;
+--- a/iokit/Kernel/arm/SweetSurface.cpp
++++ b/iokit/Kernel/arm/SweetSurface.cpp
+@@ -234,9 +234,8 @@
+ 	return ok;
+ }
+ 
+-SweetSurface *
+-sweet_surface_create_physical(uint64_t phys, uint32_t width, uint32_t height,
+-    uint32_t bytesPerRow, uint32_t pixelFormat)
++static SweetSurface *
++sweet_surface_alloc_frame(uint32_t width, uint32_t height, uint32_t bytesPerRow, uint32_t pixelFormat)
+ {
+ 	SweetSurface *s = sweet_surface_alloc();
+ 	if (s == NULL) {
+@@ -248,10 +247,51 @@
+ 	s->bytesPerElement = 4;
+ 	s->elementWidth = s->elementHeight = 1;
+ 	s->pixelFormat = pixelFormat;
+-	s->allocSize = (uint32_t)round_page(bytesPerRow * height);
++	s->allocSize = (uint32_t)round_page((uint64_t)bytesPerRow * height);
++	return s;
++}
++
++SweetSurface *
++sweet_surface_create_physical(uint64_t phys, uint32_t width, uint32_t height,
++    uint32_t bytesPerRow, uint32_t pixelFormat)
++{
++	SweetSurface *s = sweet_surface_alloc_frame(width, height, bytesPerRow, pixelFormat);
++	if (s == NULL) {
++		return NULL;
++	}
+ 	s->memory = IOMemoryDescriptor::withPhysicalAddress(phys, s->allocSize, kIODirectionInOut);
+ 	s->mapCache = kIOMapWriteCombineCache;
+ 	if (s->memory == NULL || !sweet_surface_publish(s)) {
++		s->release();
++		return NULL;
++	}
++	return s;
++}
++
++SweetSurface *
++sweet_surface_create_cached_frame(uint32_t width, uint32_t height, uint32_t bytesPerRow, uint32_t pixelFormat)
++{
++	uint64_t size = (uint64_t)bytesPerRow * height;
++	if (!width || !height || bytesPerRow < (uint64_t)width * 4 || size > SWEET_SURFACE_MAX_ALLOC) {
++		return NULL;
++	}
++	SweetSurface *s = sweet_surface_alloc_frame(width, height, bytesPerRow, pixelFormat);
++	if (s == NULL) {
++		return NULL;
++	}
++	uint64_t before = (uint64_t)OSAddAtomic64(s->allocSize, (volatile SInt64 *)&sweet_surface_wired);
++	if (before + s->allocSize <= SWEET_SURFACE_WIRED_MAX) {
++		s->memory = IOBufferMemoryDescriptor::inTaskWithOptions(kernel_task,
++		    kIODirectionInOut | kIOMemoryKernelUserShared, s->allocSize, page_size);
++	}
++	if (s->memory == NULL) {
++		OSAddAtomic64(-(SInt64)s->allocSize, (volatile SInt64 *)&sweet_surface_wired);
++		s->release();
++		return NULL;
++	}
++	s->mapCache = kIOMapDefaultCache;
++	bzero((void *)s->kernelAddress(), s->allocSize);
++	if (!sweet_surface_publish(s)) {
+ 		s->release();
+ 		return NULL;
+ 	}
+--- a/iokit/Kernel/arm/SweetSurface.h
++++ b/iokit/Kernel/arm/SweetSurface.h
+@@ -60,6 +60,10 @@
+ SweetSurface *sweet_surface_create_physical(uint64_t phys, uint32_t width,
+     uint32_t height, uint32_t bytesPerRow, uint32_t pixelFormat);
+ 
++/* A framebuffer surface for CoreAnimation backed by ordinary cached RAM. */
++SweetSurface *sweet_surface_create_cached_frame(uint32_t width, uint32_t height,
++    uint32_t bytesPerRow, uint32_t pixelFormat);
++
+ /* Send right for the surface in task (IOSurfaceLookupFromMachPort). */
+ mach_port_name_t sweet_surface_port_in_task(SweetSurface *surface, task_t task);
+ 
