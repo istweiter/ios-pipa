@@ -41,10 +41,14 @@ Run-time switches the plug-in reads (files on the phone): `/var/local/mtl2.log` 
 
 ### Isolating Metal.framework device discovery
 
-The `sweet-metal2` artifact also contains `bin/pipa-mtl2probe`. It calls only
+The `sweet-metal2` artifact also contains `bin/pipa-mtl2probe`. It calls
 `MTLCreateSystemDefaultDevice()`, prints the returned device name (or `nil`),
-and dumps the plug-in and pipeline logs. It does not submit GPU work or change
-the display renderer. For a one-shot UFS-root diagnostic, add
+then clears a 64 x 64 BGRA Metal render target, blits it into a shared buffer,
+and checks all 4096 pixels on the CPU. It has a 30-second GPU wait timeout and
+does not change the display renderer. A passing probe proves a Metal render
+pass and readback work in that process; it does not prove that backboardd uses
+Metal or that QuartzCore's shader pipelines work. The probe also dumps the
+plug-in and pipeline logs. For a one-shot UFS-root diagnostic, add
 `--files-from tools/root-files/metal2-probe.txt` to the normal ADT command.
 That list installs the probe, allows only its process name in
 `/var/local/mtl2-clients`, and stages the run-file consumed by the already

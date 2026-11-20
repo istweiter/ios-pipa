@@ -8,7 +8,7 @@ name: metal2
 #   lib/libvulkan_freedreno.dylib  Turnip with the darwin kernel backend (turnip/NativeAdrenoABI.h)
 #   bin/vktest                   Turnip smoke test: device, buffer fill/copy, a compute shader, a triangle (sweetmtl=1)
 #   bin/m2vtest                  the metal2vulkan bridge's self-test
-#   bin/pipa-mtl2probe           one-shot Metal.framework device-discovery probe
+#   bin/pipa-mtl2probe           one-shot Metal device + render-clear/readback probe
 #   SHA256SUMS
 on:
   workflow_dispatch:
