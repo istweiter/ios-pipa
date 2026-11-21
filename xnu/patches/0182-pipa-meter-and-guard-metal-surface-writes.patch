@@ -1,0 +1,364 @@
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -1121,22 +1121,62 @@
+ 	}
+ }
+ 
+-/* false: not shown, a surface of the frame is still being drawn by the GPU (SweetGPU.cpp) */
++/* Retain the selected surfaces and hold the read until the copy exits. */
++class PipaPresentSurfaces {
++	SweetSurface *surfaces[SWEET_FB_LAYERS] = {};
++
++public:
++	~PipaPresentSurfaces()
++	{
++		for (SweetSurface *surface : surfaces) {
++			if (surface != NULL) {
++				sweet_surface_present_end(surface);
++				surface->release();
++			}
++		}
++	}
++
++	bool acquire(uint32_t layer, uint32_t id)
++	{
++		SweetSurface *surface = sweet_surface_copy(id);
++		if (surface == NULL) {
++			return true;
++		}
++		if (!sweet_surface_present_begin(surface)) {
++			surface->release();
++			return false;
++		}
++		surfaces[layer] = surface;
++		return true;
++	}
++
++	SweetSurface *copy(uint32_t layer) const
++	{
++		SweetSurface *surface = surfaces[layer];
++		if (surface != NULL) {
++			surface->retain();
++		}
++		return surface;
++	}
++};
++
++/* false: not shown, a surface of the frame is still being drawn by the GPU */
+ bool
+ AppleCLCD::present(const uint8_t *rec)
+ {
+ 	uint32_t mask = get32(rec, 0x104);
++	PipaPresentSurfaces sources;
+ 
+ 	for (uint32_t layer = 0; layer < SWEET_FB_LAYERS; layer++) {
+ 		uint32_t id = get32(rec, 0x54 + 4 * layer);
+-		SweetSurface *s;
+-		bool ready;
+-
+ 		if (!(mask & (1u << layer)) || id == 0) {
+ 			continue;
+ 		}
+-		s = sweet_surface_copy(id);
+-		ready = s == NULL || (!fSeparateScanout && s == fSurface) || s->memory == NULL ||
++		if (!sources.acquire(layer, id)) {
++			return false;
++		}
++		SweetSurface *s = sources.copy(layer);
++		bool ready = s == NULL || (!fSeparateScanout && s == fSurface) || s->memory == NULL ||
+ 		    sweet_gpu_surface_ready(id, (void *)s->kernelAddress(), s->memory->getLength());
+ 		OSSafeReleaseNULL(s);
+ 		if (!ready) {
+@@ -1180,7 +1220,7 @@
+ 		if (!(mask & (1u << layer)) || id == 0) {
+ 			continue;
+ 		}
+-		SweetSurface *s = sweet_surface_copy(id);
++		SweetSurface *s = sources.copy(layer);
+ 		if (sweet_fb_swaps_logged < 16) {
+ 			sweet_fb_swaps_logged++;
+ 			IOLog("SWEET FB: swap %u layer %u surface %u %ux%u fmt 0x%x bpr %u a %d,%d %ux%u b %d,%d %dx%d\n",
+--- a/iokit/Kernel/arm/SweetSurface.cpp
++++ b/iokit/Kernel/arm/SweetSurface.cpp
+@@ -38,6 +38,8 @@
+ #include <IOKit/IOKitKeys.h>
+ #include <IOKit/IOLib.h>
+ #include <IOKit/IOLocks.h>
++#include <kern/clock.h>
++#include <pexpert/pexpert.h>
+ #include <IOKit/system.h>
+ #include <libkern/c++/OSArray.h>
+ #include <libkern/c++/OSDictionary.h>
+@@ -51,6 +53,7 @@
+ 	kSweetSurfaceLimits             = 13,
+ 	kSweetSurfaceLookupFromPort     = 34,
+ 	kSweetSurfaceCreatePort         = 35,
++	kPipaSurfaceSync                = 0x50495041, /* private Metal2 selector */
+ };
+ 
+ enum {
+@@ -73,6 +76,79 @@
+ #define kIOSurfaceLockReadOnly          0x1
+ 
+ static IOLock       *sweet_surface_lock;
++static uint32_t      pipa_surface_sync; /* 1 observes overlap, 2 excludes it */
++static uint64_t      pipa_begin_count, pipa_read_overlap, pipa_write_overlap;
++
++static bool
++pipa_surface_write_begin(SweetSurface *surface)
++{
++	IOLockLock(sweet_surface_lock);
++	uint64_t overlap = surface->displayReaders != 0 ? ++pipa_write_overlap : 0;
++	if (pipa_surface_sync == 2 && surface->displayReaders != 0) {
++		uint64_t deadline;
++		clock_interval_to_deadline(500, NSEC_PER_MSEC, &deadline);
++		while (surface->displayReaders != 0) {
++			if (IOLockSleepDeadline(sweet_surface_lock, &surface->displayReaders, deadline,
++			    THREAD_UNINT) == THREAD_TIMED_OUT && surface->displayReaders != 0) {
++				IOLockUnlock(sweet_surface_lock);
++				return false;
++			}
++		}
++	}
++	surface->gpuWriters++;
++	uint64_t count = ++pipa_begin_count;
++	IOLockUnlock(sweet_surface_lock);
++	if (overlap != 0 && (overlap <= 8 || overlap % 100 == 0)) {
++		IOLog("PIPA SURF SYNC: writer %s readers id=%u count=%llu\n",
++		    pipa_surface_sync == 2 ? "waited for" : "overlapped", surface->id, overlap);
++	}
++	if (count <= 8 || count % 500 == 0) {
++		IOLog("PIPA SURF SYNC: writer begin id=%u count=%llu\n", surface->id, count);
++	}
++	return true;
++}
++
++static void
++pipa_surface_write_end(SweetSurface *surface, uint32_t count)
++{
++	IOLockLock(sweet_surface_lock);
++	surface->gpuWriters -= count;
++	IOLockUnlock(sweet_surface_lock);
++}
++
++bool
++sweet_surface_present_begin(SweetSurface *surface)
++{
++	if (pipa_surface_sync == 0) {
++		return true;
++	}
++	IOLockLock(sweet_surface_lock);
++	bool busy = surface->gpuWriters != 0;
++	uint64_t count = busy ? ++pipa_read_overlap : 0;
++	bool allowed = !busy || pipa_surface_sync == 1;
++	if (allowed) {
++		surface->displayReaders++;
++	}
++	IOLockUnlock(sweet_surface_lock);
++	if (count != 0 && (count <= 8 || count % 100 == 0)) {
++		IOLog("PIPA SURF SYNC: display %s writer id=%u count=%llu\n",
++		    allowed ? "overlaps" : "defers for", surface->id, count);
++	}
++	return allowed;
++}
++
++void
++sweet_surface_present_end(SweetSurface *surface)
++{
++	if (pipa_surface_sync == 0) {
++		return;
++	}
++	IOLockLock(sweet_surface_lock);
++	if (--surface->displayReaders == 0 && pipa_surface_sync == 2) {
++		IOLockWakeup(sweet_surface_lock, &surface->displayReaders, false);
++	}
++	IOLockUnlock(sweet_surface_lock);
++}
+ static SweetSurface *sweet_surface_table[SWEET_SURFACE_MAX_ID];
+ static uint32_t      sweet_surface_users[SWEET_SURFACE_MAX_ID];
+ static uint32_t      sweet_surface_next_id = 1;
+@@ -407,6 +483,7 @@
+ 	IOMemoryMap  *data;
+ 	IOMemoryMap  *state;
+ 	uint32_t      count;
++	uint32_t      gpuWrites;
+ 
+ 	bool init() APPLE_KEXT_OVERRIDE { return OSObject::init(); }
+ 	void free() APPLE_KEXT_OVERRIDE;
+@@ -420,6 +497,9 @@
+ 	OSSafeReleaseNULL(data);
+ 	OSSafeReleaseNULL(state);
+ 	if (surface != NULL) {
++		if (gpuWrites != 0) {
++			pipa_surface_write_end(surface, gpuWrites);
++		}
+ 		sweet_surface_put(surface);
+ 		surface->release();
+ 		surface = NULL;
+@@ -443,6 +523,12 @@
+ 		return false;
+ 	}
+ 	sweet_surface_init_lock();
++	uint32_t syncMode = 0;
++	PE_parse_boot_argn("pipasurfsync", &syncMode, sizeof(syncMode));
++	if (syncMode == 1 || syncMode == 2) {
++		pipa_surface_sync = syncMode;
++		IOLog("PIPA SURF SYNC: mode=%u\n", syncMode);
++	}
+ 	setProperty(kIOUserClientClassKey, "IOSurfaceRootUserClient");
+ 	registerService();
+ 	IOLog("SWEET SURF: IOCoreSurfaceRoot registered\n");
+@@ -455,11 +541,14 @@
+ 	task_t   fTask;
+ 	IOLock  *fLock;
+ 	OSArray *fRefs;
++	OSArray *fWriteRefs;
++	bool     fWriteClosed;
+ 
+ 	SweetSurfaceRef *findRef(uint32_t id, unsigned int *index);
+ 	IOReturn addRef(SweetSurface *s, SweetSurfaceRef **refOut, bool *existing);
+ 	IOReturn returnSurface(SweetSurface *s, IOExternalMethodArguments *args);
+ 	IOReturn create(IOExternalMethodArguments *args);
++	IOReturn pipaSync(IOExternalMethodArguments *args);
+ 
+ public:
+ 	bool initWithTask(task_t owningTask, void *securityID, UInt32 type) APPLE_KEXT_OVERRIDE;
+@@ -508,6 +597,7 @@
+ void
+ IOSurfaceRootUserClient::free()
+ {
++	OSSafeReleaseNULL(fWriteRefs);
+ 	OSSafeReleaseNULL(fRefs);
+ 	if (fLock != NULL) {
+ 		IOLockFree(fLock);
+@@ -520,6 +610,8 @@
+ IOSurfaceRootUserClient::clientClose(void)
+ {
+ 	IOLockLock(fLock);
++	fWriteClosed = true;
++	OSSafeReleaseNULL(fWriteRefs);
+ 	fRefs->flushCollection();
+ 	IOLockUnlock(fLock);
+ 	terminate();
+@@ -816,6 +908,91 @@
+ }
+ 
+ IOReturn
++IOSurfaceRootUserClient::pipaSync(IOExternalMethodArguments *args)
++{
++	if (pipa_surface_sync == 0) {
++		return kIOReturnUnsupported;
++	}
++	if (args->scalarInputCount == 0 && args->scalarOutputCount == 1) {
++		args->scalarOutput[0] = 0x53594e43; /* SYNC protocol cookie */
++		return kIOReturnSuccess;
++	}
++	if (args->scalarInputCount != 2 || args->scalarOutputCount != 0 ||
++	    args->scalarInput[0] > UINT32_MAX || args->scalarInput[1] > 1) {
++		return kIOReturnBadArgument;
++	}
++
++	OSObject *object = NULL;
++	IOReturn result = IOUserClient::copyObjectForPortNameInTask(fTask,
++	    (mach_port_name_t)args->scalarInput[0], &object);
++	SweetSurface *surface = OSDynamicCast(SweetSurface, object);
++	if (surface == NULL) {
++		OSSafeReleaseNULL(object);
++		return result == kIOReturnSuccess ? kIOReturnBadArgument : result;
++	}
++
++	bool begin = args->scalarInput[1] != 0;
++	IOLockLock(fLock);
++	if (fWriteClosed) {
++		IOLockUnlock(fLock);
++		object->release();
++		return kIOReturnNotOpen;
++	}
++	if (begin && fWriteRefs == NULL) {
++		fWriteRefs = OSArray::withCapacity(8);
++	}
++	if (fWriteRefs == NULL) {
++		result = begin ? kIOReturnNoMemory : kIOReturnNotFound;
++	} else {
++		unsigned index = 0;
++		SweetSurfaceRef *ref = NULL;
++		for (; index < fWriteRefs->getCount(); index++) {
++			SweetSurfaceRef *entry = (SweetSurfaceRef *)fWriteRefs->getObject(index);
++			if (entry->surface == surface) {
++				ref = entry;
++				break;
++			}
++		}
++		if (begin) {
++			result = kIOReturnNoMemory;
++			if (ref == NULL && index < SWEET_SURFACE_MAX_ID) {
++				SweetSurfaceRef *entry = new SweetSurfaceRef;
++				if (entry != NULL && entry->init() && sweet_surface_get(surface)) {
++					surface->retain();
++					entry->surface = surface;
++					if (fWriteRefs->setObject(entry)) {
++						ref = entry;
++					}
++				}
++				OSSafeReleaseNULL(entry);
++			}
++			if (ref != NULL) {
++				if (pipa_surface_write_begin(surface)) {
++					ref->gpuWrites++;
++					result = kIOReturnSuccess;
++				} else {
++					if (ref->gpuWrites == 0) {
++						fWriteRefs->removeObject(index);
++					}
++					result = kIOReturnTimeout;
++				}
++			}
++		} else if (ref != NULL && ref->gpuWrites != 0) {
++			pipa_surface_write_end(surface, 1);
++			if (--ref->gpuWrites == 0) {
++				fWriteRefs->removeObject(index);
++			}
++			result = kIOReturnSuccess;
++		} else {
++			result = kIOReturnNotFound;
++		}
++	}
++	IOLockUnlock(fLock);
++	object->release();
++	return result;
++}
++
++IOReturn
+ IOSurfaceRootUserClient::externalMethod(uint32_t selector, IOExternalMethodArguments *args,
+     __unused IOExternalMethodDispatch *dispatch, __unused OSObject *target,
+     __unused void *reference)
+@@ -823,6 +1000,8 @@
+ 	uint64_t arg0 = args->scalarInputCount > 0 ? args->scalarInput[0] : 0;
+ 
+ 	switch (selector) {
++	case kPipaSurfaceSync:
++		return pipaSync(args);
+ 	case kSweetSurfaceLimits: {
+ 		uint8_t limits[0x18] = { 0 };
+ 		put32(limits, 0x0, SWEET_SURFACE_ROW_ALIGN - 1);
+--- a/iokit/Kernel/arm/SweetSurface.h
++++ b/iokit/Kernel/arm/SweetSurface.h
+@@ -40,6 +40,7 @@
+ 	IOBufferMemoryDescriptor *state;        /* shared state page, read-only for users */
+ 	IOMemoryMap              *kernelMap;    /* lazily created for kernel copies */
+ 	bool                      clientMemory; /* the creator's own pages (IOSurfaceAddress), prepared */
++	uint32_t                  gpuWriters, displayReaders; /* protected by the surface lock */
+ 	bool                      readOnly;     /* ...prepared for reading only: mapped read-only */
+ 
+ 	bool init() APPLE_KEXT_OVERRIDE { return OSObject::init(); }
+@@ -49,6 +50,10 @@
+ 	uintptr_t kernelAddress();
+ };
+ 
++/* Pin the read interval against explicitly tracked Metal2 writers. */
++bool sweet_surface_present_begin(SweetSurface *s);
++void sweet_surface_present_end(SweetSurface *s);
++
+ /* Retained surface for an id, or NULL. */
+ SweetSurface *sweet_surface_copy(uint32_t id);
+ 

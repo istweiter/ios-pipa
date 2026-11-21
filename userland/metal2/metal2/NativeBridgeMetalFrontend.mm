@@ -9,6 +9,7 @@
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
 #import <IOSurface/IOSurfaceRef.h>
+#include <IOKit/IOKitLib.h>
 #import <objc/runtime.h>
 #include <algorithm>
 #include <atomic>
@@ -420,6 +421,80 @@ NB_RESOURCE_SPI
  [self getBytes:bytes bytesPerRow:row bytesPerImage:row*r.size.height fromRegion:r mipmapLevel:level slice:0];
 }
 @end
+static IOSurfaceRef importedSurface(id item) {
+ if([item isKindOfClass:[NBTexture class]])return [(NBTexture *)item surface];
+ if([item isKindOfClass:[NBBuffer class]])return [(NBBuffer *)item surfaceOwner];
+ return nullptr;
+}
+
+static constexpr uint32_t kPipaSurfaceSync = 0x50495041;
+
+static io_connect_t pipaSurfaceSyncConnection() {
+ static io_connect_t connection = IO_OBJECT_NULL;
+ static dispatch_once_t once;
+ dispatch_once(&once, ^{
+  const char *enabled = getenv("SWEET_M2V_SURFACE_SYNC");
+  if(!enabled || strcmp(enabled,"1") || strcmp(getprogname(),"backboardd"))return;
+
+  io_service_t service = IOServiceGetMatchingService(kIOMainPortDefault,IOServiceMatching("IOCoreSurfaceRoot"));
+  if(service != IO_OBJECT_NULL) {
+   kern_return_t status = IOServiceOpen(service,mach_task_self(),0,&connection);
+   IOObjectRelease(service);
+   if(status == KERN_SUCCESS) {
+    uint64_t version = 0;
+    uint32_t count = 1;
+    status = IOConnectCallScalarMethod(connection,kPipaSurfaceSync,nullptr,0,&version,&count);
+    if(status == KERN_SUCCESS && count == 1 && version == 0x53594e43) {
+     NBLOG(@"PIPA SURF SYNC: backboardd connected");
+     return;
+    }
+    IOServiceClose(connection);
+   }
+   connection = IO_OBJECT_NULL;
+  }
+  NBLOG(@"PIPA SURF SYNC: kernel protocol unavailable");
+ });
+ return connection;
+}
+
+static void endPipaSurfaceWrites(std::vector<mach_port_t> &ports) {
+ if(ports.empty())return;
+ io_connect_t connection = pipaSurfaceSyncConnection();
+ for(mach_port_t port : ports) {
+  uint64_t input[] = {port,0};
+  kern_return_t status = IOConnectCallScalarMethod(connection,kPipaSurfaceSync,input,2,nullptr,nullptr);
+  if(status != KERN_SUCCESS)NBLOG(@"PIPA SURF SYNC: writer end failed %#x",(unsigned)status);
+  mach_port_deallocate(mach_task_self(),port);
+ }
+ ports.clear();
+}
+
+static bool beginPipaSurfaceWrites(NSMutableSet *surfaces,std::vector<mach_port_t> &ports) {
+ if(!surfaces.count)return true;
+ io_connect_t connection = pipaSurfaceSyncConnection();
+ if(connection == IO_OBJECT_NULL)return true;
+
+ std::vector<uint32_t> ids;
+ for(id item in surfaces) {
+  IOSurfaceRef surface = importedSurface(item);
+  if(!surface)continue;
+  uint32_t sid = IOSurfaceGetID(surface);
+  if(std::find(ids.begin(),ids.end(),sid) != ids.end())continue;
+  mach_port_t port = IOSurfaceCreateMachPort(surface);
+  if(!MACH_PORT_VALID(port))return false;
+  uint64_t input[] = {port,1};
+  kern_return_t status = IOConnectCallScalarMethod(connection,kPipaSurfaceSync,input,2,nullptr,nullptr);
+  if(status != KERN_SUCCESS) {
+   mach_port_deallocate(mach_task_self(),port);
+   NBLOG(@"PIPA SURF SYNC: writer begin id=%u failed %#x",sid,(unsigned)status);
+   return false;
+  }
+  ports.push_back(port);
+  ids.push_back(sid);
+ }
+ return true;
+}
+
 // A command can use many independent imports/views of one IOSurface. Their
 // owners keep the mapping live through this phase. Maintain each exact CPU
 // range once; no address identity or decision is carried into another phase
@@ -430,8 +505,7 @@ static void flushSurfaces(NSMutableSet *surfaces) {
  ranges.reserve(surfaces.count);
  const size_t page=(size_t)getpagesize();
  for(id item in surfaces) {
-  IOSurfaceRef surface=[item isKindOfClass:[NBTexture class]]?[(NBTexture *)item surface]:
-                       ([item isKindOfClass:[NBBuffer class]]?[(NBBuffer *)item surfaceOwner]:nullptr);
+  IOSurfaceRef surface=importedSurface(item);
   if(!surface)continue;
   void *rawBase=IOSurfaceGetBaseAddress(surface);
   const size_t allocation=IOSurfaceGetAllocSize(surface);
@@ -836,6 +910,7 @@ static void notified(void *context,uint64_t value) {
 @public
  EncodedWork encodedWork;   // the command buffer's single encoder thread, not global counter deltas
  uint64_t createdUs;
+ std::vector<mach_port_t> pipaWritePorts;
 }
 @property(nonatomic) NmbCommandBuffer *handle;
 @property(nonatomic,strong) NBQueue *queue;
@@ -1453,6 +1528,7 @@ static void scheduled(void *context);
 // After completion (or a refusal): invalidate the CPU's view of GPU-written imported surfaces, then completed handlers, once.
 - (void)finish {
  if(!self.failedLocally)flushSurfaces(_writtenSurfaces);
+ endPipaSurfaceWrites(pipaWritePorts);
  // Actual GPU completion (or a local refusal that never submitted) is the
  // release point. A retained completed command must not pin every old frame.
  [_surfaces removeAllObjects];[_writtenSurfaces removeAllObjects];[_resourceOwners removeAllObjects];
@@ -1484,6 +1560,9 @@ static void scheduled(void *context);
  dispatch_group_enter(_handlers);
  dispatch_group_enter(_schedulingHandlers);
  @synchronized(gInFlight){[gInFlight addObject:self];}
+ if(!self.encodeFailure && !beginPipaSurfaceWrites(_writtenSurfaces,pipaWritePorts)) {
+  [self refuse:@"PIPA SURF SYNC: could not reserve an IOSurface for GPU writes"];
+ }
  if(!self.encodeFailure) {
   flushSurfaces(_surfaces);
   // Completion owns this reference; the runtime orders the non-owning scheduled callback before it.
