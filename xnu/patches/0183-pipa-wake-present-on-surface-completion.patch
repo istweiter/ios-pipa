@@ -1,0 +1,191 @@
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -276,7 +276,7 @@
+ 	void addClient(IOMobileFramebufferUserClient *client);
+ 	void removeClient(IOMobileFramebufferUserClient *client);
+ 	void swap(const uint8_t *rec);
+-	bool present(const uint8_t *rec);
++	bool present(const uint8_t *rec, bool &deferredForWriter);
+ 	bool coversDisplay(const uint8_t *rec);         /* (0156) */
+ 	void presentSmooth(uint64_t base, uint64_t row, int32_t sx, int32_t w, int32_t dy, int32_t h,
+ 	    uint32_t px0, uint32_t px1, uint32_t py0, uint32_t py1);     /* (0155) */
+@@ -752,6 +752,7 @@
+ 			}
+ 			continue;
+ 		}
++		uint64_t surfaceEpoch = sweet_surface_present_epoch();
+ 		memcpy(rec, fPending, SWEET_FB_SWAP_REC_SIZE);
+ 		fDirty = false;
+ 		IOLockUnlock(fLock);
+@@ -805,7 +806,7 @@
+ 				IOLockUnlock(fLock);
+ 			}
+ 		}
+-		bool shown = false;
++		bool shown = false, deferredForWriter = false;
+ 		if (gpuFrame >= 0) {
+ 			/* (0159) nothing to copy: once the GPU has finished drawing the frame, it is flipped to */
+ 			shown = sweet_gpu_surface_ready(fFlipSurf[gpuFrame]->id, NULL, 0);
+@@ -815,7 +816,7 @@
+ 				 * Pipa flip path keeps the same stride as this canvas. */
+ 				fDraw = (uintptr_t)fPipaCanvas->getBytesNoCopy();
+ 				fDrawRow = fRowBytes;
+-				shown = present(rec);
++				shown = present(rec, deferredForWriter);
+ 				if (shown) {
+ 					memcpy((void *)fFlipVA[target], (const void *)fDraw, (uint64_t)fRowBytes * fHeight);
+ 				}
+@@ -823,7 +824,7 @@
+ 		} else {
+ 			fDraw = target >= 0 ? fFlipVA[target] : fFlipCount ? fFlipVA[fFlipPending >= 0 ? fFlipPending : fFlipFront] : fPixels;
+ 			fDrawRow = target >= 0 || (fFlipCount && fFlipPending >= 0) ? fFlipStride : fFlipCount ? fFrontStride : fRowBytes;
+-			shown = present(rec);
++			shown = present(rec, deferredForWriter);
+ 		}
+ 		int flipTo = gpuFrame >= 0 ? gpuFrame : target;
+ 		if (flipTo >= 0) {
+@@ -849,7 +850,7 @@
+ 			IOLockUnlock(fLock);
+ 		}
+ 		uint64_t spent = mach_absolute_time() - began;
+-		if (!shown) {
++		if (!shown && !deferredForWriter) {
+ 			IODelay(500);   /* (xnu 0153; XNU blocks the thread, not spins, for this long) the GPU's frame looked at again after 0.5 ms (was 2: a late frame missed its vsync) */
+ 		}
+ 		IOLockLock(fLock);
+@@ -869,11 +870,17 @@
+ 		} else {
+ 			/* the GPU is still drawing a surface of this frame: again, unless a newer one has come meanwhile */
+ 			fStatBusy++;
+-			if (!fDirty) {
++			bool newer = fDirty;
++			if (!newer) {
+ 				memcpy(fPending, rec, SWEET_FB_SWAP_REC_SIZE);
+ 				fDirty = true;
+ 			}
+ 			fPresentWanted = true;
++			if (deferredForWriter && !newer && !fPowerOff) {
++				IOLockUnlock(fLock);
++				sweet_surface_present_wait(surfaceEpoch);
++				IOLockLock(fLock);
++			}
+ 		}
+ 	}
+ }
+@@ -1116,6 +1123,7 @@
+ 	fDirty = true;
+ 	fStatSwaps++;                   /* (xnu 0148) */
+ 	IOLockUnlock(fLock);
++	sweet_surface_present_signal();
+ 	if ((++sweet_fb_swap_count % 1000) == 0) {
+ 		IOLog("SWEET FB: %llu swaps\n", sweet_fb_swap_count);
+ 	}
+@@ -1162,7 +1170,7 @@
+ 
+ /* false: not shown, a surface of the frame is still being drawn by the GPU */
+ bool
+-AppleCLCD::present(const uint8_t *rec)
++AppleCLCD::present(const uint8_t *rec, bool &deferredForWriter)
+ {
+ 	uint32_t mask = get32(rec, 0x104);
+ 	PipaPresentSurfaces sources;
+@@ -1173,6 +1181,7 @@
+ 			continue;
+ 		}
+ 		if (!sources.acquire(layer, id)) {
++			deferredForWriter = true;
+ 			return false;
+ 		}
+ 		SweetSurface *s = sources.copy(layer);
+@@ -1509,6 +1518,7 @@
+ 				}
+ 				fFB->fPresentWanted = true;
+ 				IOLockWakeup(fFB->fLock, &fFB->fPresentWanted, true);
++				sweet_surface_present_signal();
+ 			}
+ 			IOLockUnlock(fFB->fLock);
+ 			IOLog("SWEET FB: display %s\n", off ? "off" : "on");
+--- a/iokit/Kernel/arm/SweetSurface.cpp
++++ b/iokit/Kernel/arm/SweetSurface.cpp
+@@ -78,6 +78,48 @@
+ static IOLock       *sweet_surface_lock;
+ static uint32_t      pipa_surface_sync; /* 1 observes overlap, 2 excludes it */
+ static uint64_t      pipa_begin_count, pipa_read_overlap, pipa_write_overlap;
++static uint64_t      pipa_present_epoch;
++
++static void
++pipa_surface_signal_locked(void)
++{
++	++pipa_present_epoch;
++	IOLockWakeup(sweet_surface_lock, &pipa_present_epoch, true);
++}
++
++uint64_t
++sweet_surface_present_epoch(void)
++{
++	if (pipa_surface_sync != 2) {
++		return 0;
++	}
++	IOLockLock(sweet_surface_lock);
++	uint64_t epoch = pipa_present_epoch;
++	IOLockUnlock(sweet_surface_lock);
++	return epoch;
++}
++
++void
++sweet_surface_present_wait(uint64_t epoch)
++{
++	uint64_t deadline;
++	clock_interval_to_deadline(34, NSEC_PER_MSEC, &deadline);
++	IOLockLock(sweet_surface_lock);
++	if (pipa_present_epoch == epoch) {
++		IOLockSleepDeadline(sweet_surface_lock, &pipa_present_epoch, deadline, THREAD_UNINT);
++	}
++	IOLockUnlock(sweet_surface_lock);
++}
++
++void
++sweet_surface_present_signal(void)
++{
++	if (pipa_surface_sync == 2) {
++		IOLockLock(sweet_surface_lock);
++		pipa_surface_signal_locked();
++		IOLockUnlock(sweet_surface_lock);
++	}
++}
+ 
+ static bool
+ pipa_surface_write_begin(SweetSurface *surface)
+@@ -113,6 +155,9 @@
+ {
+ 	IOLockLock(sweet_surface_lock);
+ 	surface->gpuWriters -= count;
++	if (pipa_surface_sync == 2 && surface->gpuWriters == 0) {
++		pipa_surface_signal_locked();
++	}
+ 	IOLockUnlock(sweet_surface_lock);
+ }
+ 
+@@ -527,7 +572,8 @@
+ 	PE_parse_boot_argn("pipasurfsync", &syncMode, sizeof(syncMode));
+ 	if (syncMode == 1 || syncMode == 2) {
+ 		pipa_surface_sync = syncMode;
+-		IOLog("PIPA SURF SYNC: mode=%u\n", syncMode);
++		IOLog("PIPA SURF SYNC: mode=%u wake=%s\n", syncMode,
++		    syncMode == 2 ? "writer-or-swap" : "observe");
+ 	}
+ 	setProperty(kIOUserClientClassKey, "IOSurfaceRootUserClient");
+ 	registerService();
+--- a/iokit/Kernel/arm/SweetSurface.h
++++ b/iokit/Kernel/arm/SweetSurface.h
+@@ -53,6 +53,10 @@
+ /* Pin the read interval against explicitly tracked Metal2 writers. */
+ bool sweet_surface_present_begin(SweetSurface *s);
+ void sweet_surface_present_end(SweetSurface *s);
++/* A snapshot stops a completion or swap racing the transition to sleep. */
++uint64_t sweet_surface_present_epoch(void);
++void sweet_surface_present_wait(uint64_t epoch);
++void sweet_surface_present_signal(void);
+ 
+ /* Retained surface for an id, or NULL. */
+ SweetSurface *sweet_surface_copy(uint32_t id);
